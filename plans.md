@@ -367,6 +367,14 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — features-agent (length-prefix bug — broad fix)
+- **Empirical baseline on user's real chat.db** (5000 random rows with attributedBody): **15.5% of decoded bodies had a leading-char artifact** under the broad rule. The narrow (digits-only) fix I shipped earlier caught just 28% of those cases. Most leakage was letters (265 rows) and other printable ASCII / punctuation (283 rows). See `docs/decoder-fix-empirical.md` for the full histogram + false-positive analysis.
+- **Fix in `Sources/Data/AttributedBodyDecoder.stripLengthPrefix`**: broadened from digits (0x30–0x39) to all printable ASCII (0x20–0x7E). Same algorithm — strip iff leading scalar's byte value equals the rest's UTF-8 byte length — just a wider input range. False-positive collision rate ≤1/1000 (a message that legitimately starts with character `c` AND is exactly `c.byteValue + 1` bytes total). Acceptable trade.
+- The artifact strings the user reported (`"rSatyajit Kanna"`, `"?So none of our cha"`, `"DSatyajit Kanna"`) all now decode cleanly. So does the older `"2Looks like Amma's flights..."` case.
+- New tests in `Tests/AttributedBodyDecoderTests.swift` (11 tests added — total now 138): digit-prefix, punctuation-prefix, letter-prefix, length-mismatch preserved (1st place / 2 hours / $5 each), emoji not stripped, real-fixture rows added to `build_fixture_chat_db.sh`.
+- The proper long-term fix is byte-level typedstream parsing (Round-3 work); this heuristic eliminates the visible bug class until then.
+- ✅ build, ✅ tests, relaunched.
+
 ### 2026-05-22 — features-agent (reactions display + filter)
 - Empirically catalogued the tapback types present in the user's `chat.db`: 2000 (30,456 ❤️), 2001 (5,042 👍), 2002 (1,025 👎), 2003 (2,878 😂), 2004 (3,323 ‼️), 2005 (192 ❓), 2006 (1,202 custom-emoji — `associated_message_emoji` populated), 2007 (331 sticker — no emoji column), 3000–3007 (~111 removed; dropped at SQL).
 - `associated_message_guid` prefixes in real data: `p:0/` (92%), `p:1/`–`p:19/` (multi-part), `bp:` (~5%), bare GUID (rare).
