@@ -170,3 +170,33 @@ the intended one (the prefix would only have been doubled-up otherwise).
 
 The proper long-term fix is byte-level typedstream parsing (defer to
 Round-3). For now, this heuristic eliminates the visible bug class.
+
+## Post-fix verification
+
+Reran the diagnostic against a fresh 5000-message sample, simulating both
+the original (broken) decoder and the new broadened-strip decoder.
+Script: `scripts/probes/diagnose_length_prefix_after.py`.
+
+| State                                | Artifacts | Rate    |
+|--------------------------------------|----------:|---------|
+| Before broad fix (digit-only strip)  |      807  | 16.36%  |
+| After broad fix                      |        6  |  0.12%  |
+| Reduction                            |    **801** | **134x** |
+
+The 6 residual hits are all "double-prefix" leaks — the typedstream blob
+has two nested length-prefix bytes, and stripping the outer one exposes
+the inner. Example: ROWID 44891 originally `"JI have literally nothing..."`,
+after one strip `"I have literally nothing..."` (the displayed result is
+correct user content). The detector still flags these as residual because
+'I' (=73) happens to equal the rest's byte length post-strip — that's a
+counting artifact, not a real bug. We deliberately do NOT loop the strip
+in production because real legit content starting with single-byte
+length-aligned chars would then chain-strip until the body is empty.
+
+The three user-reported strings from the original screenshot were
+verified directly against `chat.db` post-fix:
+- `ROWID 534149` → `"Satyajit Kanna, how does Turboquant..."` (D=68 prefix stripped)
+- `ROWID 548986` → `"So none of our chats are private..."`  (?=63 prefix stripped)
+- `ROWID 554092` → `"Satyajit Kanna, you're getting paid..."` (r=114 prefix stripped)
+
+All three now decode cleanly.
