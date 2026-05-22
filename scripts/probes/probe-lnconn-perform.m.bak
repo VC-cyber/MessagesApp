@@ -21,7 +21,7 @@
 - (void)setMediatorConnection:(id)c;
 @end
 
-#define LOG(...) do { fLOG(stderr, __VA_ARGS__); fflush(stderr); } while(0)
+#define LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
 
 int main(int argc, const char *argv[]) {
     if (argc < 3) {
@@ -73,15 +73,15 @@ int main(int argc, const char *argv[]) {
     void *retainedAction = NULL;
     [inv getReturnValue:&retainedAction];
     id action = (__bridge id)retainedAction;
-    if (!action) { LOG("FATAL: action nil\n"); return 1; }
-    LOG("action: identifier=%s\n",
+    if (!action) { printf("FATAL: action nil\n"); return 1; }
+    printf("action: identifier=%s\n",
            [[action valueForKey:@"identifier"] UTF8String]);
 
     // --- Get a connection to Messages.app ---
     id conn = [[LNAppConnClass alloc] performSelector:@selector(initWithBundleIdentifier:)
                                            withObject:@"com.apple.MobileSMS"];
-    LOG("conn: %s\n", [[conn description] UTF8String]);
-    if (!conn) { LOG("FATAL: no conn\n"); return 1; }
+    printf("conn: %s\n", [[conn description] UTF8String]);
+    if (!conn) { printf("FATAL: no conn\n"); return 1; }
 
     // Connect with options
     Class LNConnOptsClass = NSClassFromString(@"LNMacApplicationConnectionOptions") ?:
@@ -91,60 +91,60 @@ int main(int argc, const char *argv[]) {
         id opts = [[LNConnOptsClass alloc] init];
         connOpts = opts;
     }
-    LOG("connOpts: %s\n", [[connOpts description] UTF8String] ?: "(nil)");
+    printf("connOpts: %s\n", [[connOpts description] UTF8String] ?: "(nil)");
 
     // Some connections need explicit connectWithOptions
     if ([conn respondsToSelector:@selector(connectWithOptions:)]) {
         @try {
             BOOL connected = [conn connectWithOptions:connOpts];
-            LOG("connectWithOptions: %d\n", connected);
+            printf("connectWithOptions: %d\n", connected);
         } @catch (NSException *e) {
-            LOG("connectWithOptions exception: %s\n", [[e description] UTF8String]);
+            printf("connectWithOptions exception: %s\n", [[e description] UTF8String]);
         }
     }
 
     // --- Create executor options ---
     id execOpts = [[LNExecOptsClass alloc] init];
-    LOG("execOpts: %s\n", [[execOpts description] UTF8String]);
+    printf("execOpts: %s\n", [[execOpts description] UTF8String]);
 
     // --- executorForAction:options:delegate: ---
     if (![conn respondsToSelector:@selector(executorForAction:options:delegate:)]) {
-        LOG("conn doesn't respond to executorForAction:options:delegate:\n");
+        printf("conn doesn't respond to executorForAction:options:delegate:\n");
         return 1;
     }
     id executor = nil;
     @try {
         executor = [conn executorForAction:action options:execOpts delegate:nil];
     } @catch (NSException *e) {
-        LOG("executorForAction exception: %s\n", [[e description] UTF8String]);
+        printf("executorForAction exception: %s\n", [[e description] UTF8String]);
         return 1;
     }
-    LOG("executor: %s\n", [[executor description] UTF8String]);
+    printf("executor: %s\n", [[executor description] UTF8String]);
 
     if (!executor) {
-        LOG("FATAL: no executor\n");
+        printf("FATAL: no executor\n");
         return 1;
     }
 
     // --- Perform ---
-    LOG("\nCalling [executor perform]...\n");
+    printf("\nCalling [executor perform]...\n");
     @try {
         [executor performSelector:@selector(perform)];
     } @catch (NSException *e) {
-        LOG("perform exception: %s\n", [[e description] UTF8String]);
+        printf("perform exception: %s\n", [[e description] UTF8String]);
         return 1;
     }
 
-    LOG("Sleeping 5s to let async dispatch happen...\n");
+    printf("Sleeping 5s to let async dispatch happen...\n");
     [NSThread sleepForTimeInterval:5.0];
 
     // Check state
     @try {
-        LOG("executor state: %s\n", [[[executor valueForKey:@"state"] description] UTF8String]);
+        printf("executor state: %s\n", [[[executor valueForKey:@"state"] description] UTF8String]);
     } @catch (NSException *e) {
-        LOG("state read exception: %s\n", [[e description] UTF8String]);
+        printf("state read exception: %s\n", [[e description] UTF8String]);
     }
 
-    LOG("Done\n");
+    printf("Done\n");
     return 0;
 }

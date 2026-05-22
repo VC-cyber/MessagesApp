@@ -367,6 +367,18 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — features-agent (reactions display + filter)
+- Empirically catalogued the tapback types present in the user's `chat.db`: 2000 (30,456 ❤️), 2001 (5,042 👍), 2002 (1,025 👎), 2003 (2,878 😂), 2004 (3,323 ‼️), 2005 (192 ❓), 2006 (1,202 custom-emoji — `associated_message_emoji` populated), 2007 (331 sticker — no emoji column), 3000–3007 (~111 removed; dropped at SQL).
+- `associated_message_guid` prefixes in real data: `p:0/` (92%), `p:1/`–`p:19/` (multi-part), `bp:` (~5%), bare GUID (rare).
+- **Perf footgun caught and fixed**: a leading-wildcard `LIKE '%' || m.guid` correlated subquery did a full tapback scan per candidate (multi-minute on user's DB). Switched to an `IN ('m.guid', 'p:0/' || m.guid, …, 'bp:' || m.guid)` enumeration, which uses the partial index `message_idx_associated_message2 ON message(associated_message_guid) WHERE associated_message_guid IS NOT NULL`. Sub-second when date-narrowed.
+- New files: `Sources/Data/Reaction.swift`, `Sources/Data/ReactionLoader.swift` (batched, no N+1), `Sources/UI/Components/ReactionCluster.swift`, `Tests/ReactionParserTests.swift` (14 tests), `Tests/ReactionLoaderTests.swift` (16 tests).
+- Modified: `MessageSearch.swift` (ReactionFilter + reactionsClause SQL + `Result.reactions`), `QueryAutocomplete.swift` + `QuerySuggestionsProvider.swift` (reactions token + suggestions), `QuerySuggestionsPopover.swift` + `DesignTokens.swift` (reaction kind/category), `SpotlightPanel.swift` + `ResultRow.swift` (cluster render), `PreviewData.swift` (seed reactions), `Tests/Fixtures/build_fixture_chat_db.sh` (reactable msg + 8 tapback rows).
+- **Query syntax shipped**: `reactions:>=N`, `<=N`, `>N`, `<N`, `=N`, bare `:N` (==), `:any` (>=1), `:love` / `:like` / `:laugh` / `:emphasize` / `:question` / `:dislike`. Multiple tokens AND. Case-insensitive prefix + value.
+- **Visual** (Apple-HIG-respecting): solid pill badges (not glass — content layer); 11pt emoji + 2-digit monospaced count (count omitted when 1); max 4 badges then `+N` overflow with senders in tooltip; pink chip tint; sort by count desc, tie-break first-seen.
+- Per-sender latest-wins for reactions (so a user who swapped reactions only shows their current one). Removed reactions dropped entirely.
+- ✅ build, ✅ tests (30 new — 127 total; up from 86 pre-reactions).
+- Known limitations: multi-part prefixes `p:10/`–`p:19/` aren't covered by the IN list (extraordinarily rare); unbounded `reactions:>=N` full-history is ~5s without date narrowing; sticker (2007) reactions render with generic 🏷️.
+
 ### 2026-05-22 — codex (message-level reveal research)
 - User asked for the most testable path to reveal a Messages.app message by `(messageGUID, chatGUID)` without body matching, including attachment-only/image-only messages.
 - Local Tahoe inspection found:
