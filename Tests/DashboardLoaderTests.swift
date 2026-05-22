@@ -58,7 +58,7 @@ final class DashboardLoaderTests: XCTestCase {
     // MARK: - Overview
 
     /// All-time overview totals are derived from the entire message table
-    /// (excluding tapbacks). 18 real messages, 12 sent + 6 received.
+    /// (excluding tapbacks). 20 real messages, 14 sent + 6 received.
     func testOverviewAllTime() throws {
         let db = try openFixture()
         let stats = try DashboardLoader.loadSync(
@@ -69,8 +69,8 @@ final class DashboardLoaderTests: XCTestCase {
             calendar: calendar
         )
 
-        XCTAssertEqual(stats.overview.total, 18, "Expect 18 real messages (28 rows minus 10 tapbacks/reactions).")
-        XCTAssertEqual(stats.overview.sent, 12)
+        XCTAssertEqual(stats.overview.total, 20, "Expect 20 real messages (30 rows minus 10 tapbacks/reactions).")
+        XCTAssertEqual(stats.overview.sent, 14)
         XCTAssertEqual(stats.overview.received, 6)
         XCTAssertEqual(stats.overview.chats, 4)
         XCTAssertNotNil(stats.overview.oldest)
@@ -291,9 +291,11 @@ final class DashboardLoaderTests: XCTestCase {
             now: testNow, calendar: calendar
         )
 
-        // Total of 28 messages, 10 of them are tapbacks/reactions
-        // (rows 4, 6, 7, 8, 9, 10, 11, 12, 13, 140). So real = 18.
-        XCTAssertEqual(stats.overview.total, 18,
+        // Total of 30 messages, 10 of them are tapbacks/reactions
+        // (rows 4, 6, 7, 8, 9, 10, 11, 12, 13, 140). So real = 20.
+        // (Rows 200/201 are length-prefix-bug fixture rows added by
+        // features-agent; they're real sent messages and DO count.)
+        XCTAssertEqual(stats.overview.total, 20,
                        "Tapback/reaction rows must NOT count.")
     }
 

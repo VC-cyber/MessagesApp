@@ -51,6 +51,44 @@ ATTRIB_HEX="040b73747265616d747970656481e80384014084848412124e53537472696e670084
 ATTRIB_HEX+="1e68656c6c6f2063616374757320686f772061726520796f7520746f64617986840269868400"
 
 # ---------------------------------------------------------------------------
+# Length-prefix bug fixture blobs (rows 200 / 201)
+# ---------------------------------------------------------------------------
+# These exercise the typedstream NSString length-prefix leak. Layout follows
+# the same shape as the row-1 blob above:
+#
+#   04 0b           streamtyped magic
+#   "streamtyped"   ASCII run (broken by next byte)
+#   81 e8 03 84 01  framing
+#   40              '@' framing sigil
+#   84 84 84        framing
+#   12 "NSString"   length(0x12)+class name
+#   00 84 84 08     framing
+#   <LEN>           the BUG: a single byte equal to the body's UTF-8 byte len
+#   <BODY>          plain ASCII body, exactly LEN bytes
+#   86 84 02 69 86 84 00   trailing framing
+#
+# Row 200: body is 50 'x' bytes → LEN = 0x32 (ASCII '2'). Pre-fix this
+#          decodes as "2xxxxx…x" (51 chars). Post-fix it decodes as
+#          "xxxxx…x" (50 chars).
+# Row 201: body is 65 'y' bytes → LEN = 0x41 (ASCII 'A'). Pre-broadening
+#          this decodes as "Ayyyyy…y" (66 chars) since the narrow rule
+#          only handles digits. Post-broadening it decodes as "yyyyy…y".
+#
+# ---- row 200 (digit-prefix) ----
+ATTRIB_DIGIT_HEX="040b73747265616d747970656481e80384014084848412124e53537472696e670084840808"
+ATTRIB_DIGIT_HEX+="32"  # length prefix = 50 ('2')
+# 50 'x' bytes in hex (= "78" repeated 50 times):
+ATTRIB_DIGIT_HEX+="7878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+ATTRIB_DIGIT_HEX+="86840269868400"
+
+# ---- row 201 (letter-prefix 'A') ----
+ATTRIB_LETTER_HEX="040b73747265616d747970656481e80384014084848412124e53537472696e670084840808"
+ATTRIB_LETTER_HEX+="41"  # length prefix = 65 ('A')
+# 65 'y' bytes in hex (= "79" repeated 65 times):
+ATTRIB_LETTER_HEX+="7979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979"
+ATTRIB_LETTER_HEX+="86840269868400"
+
+# ---------------------------------------------------------------------------
 # Time values (Mac absolute time; epoch = 2001-01-01 00:00:00 UTC)
 # ---------------------------------------------------------------------------
 # Modern (nanoseconds): 2024-06-15 12:00:00 UTC
@@ -423,6 +461,31 @@ INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service,
 VALUES (140, 'msg-dash-140-tap', NULL, 3, 0, $NS_DATE_RECENT_A, 'iMessage',
    'p:0/msg-dash-100', 2000);
 
+-- ----- length-prefix bug fixture rows (200, 201) -----
+-- These exercise AttributedBodyDecoder.stripLengthPrefix for both branches:
+--
+--   row 200: digit length prefix '2' (= 50) over a 50-byte body. Pre-fix
+--            decoded as "2xxx…" (51 chars); post-fix decodes as "xxx…" (50).
+--   row 201: letter length prefix 'A' (= 65) over a 65-byte body. Pre
+--            BROADENING this leaked through (the narrow rule only handled
+--            digits); post-broadening it decodes clean.
+--
+-- Both rows are SENT by me, modern (nanoseconds), with NULL text and a
+-- non-NULL attributedBody — the most common modern-row shape.
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_type, attributedBody)
+VALUES
+  (200, 'msg-lp-digit', NULL, NULL, 1, $NS_DATE, 'iMessage',
+   0, x'$ATTRIB_DIGIT_HEX');
+
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_type, attributedBody)
+VALUES
+  (201, 'msg-lp-letter', NULL, NULL, 1, $NS_DATE, 'iMessage',
+   0, x'$ATTRIB_LETTER_HEX');
+
 -- ----- chat_message_join -----
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 1, $NS_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 2, $SEC_DATE);
@@ -464,6 +527,10 @@ INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 134
 
 -- The dashboard-fixture tapback (row 140) lives in chat 1.
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 140, $NS_DATE_RECENT_A);
+
+-- Length-prefix bug fixture rows (200, 201) — chat 1 (1:1).
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 200, $NS_DATE);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 201, $NS_DATE);
 
 -- ----- indexes (mirror real chat.db enough to keep query plans honest) -----
 CREATE INDEX message_idx_date ON message(date);

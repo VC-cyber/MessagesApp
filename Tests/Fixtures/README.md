@@ -36,12 +36,14 @@ contact-merge logic should collapse them.
 
 ### Messages
 
-| ROWID | is_from_me | handle_id | date format | text  | attributedBody | associated_message_type | Chat | Notes                            |
-|------:|-----------:|----------:|-------------|-------|----------------|------------------------:|-----:|----------------------------------|
-| 1     | 1          | NULL      | nanoseconds | NULL  | hex blob       | 0                       | 1    | Modern sent — must decode blob   |
-| 2     | 0          | 1         | seconds     | set   | NULL           | 0                       | 1    | Legacy row, seconds time         |
-| 3     | 0          | 3         | nanoseconds | set   | NULL           | 0                       | 2    | Group, received from contact B   |
-| 4     | 0          | 1         | nanoseconds | NULL  | NULL           | 2000                    | 2    | Tapback — must be filterable out |
+| ROWID | is_from_me | handle_id | date format | text  | attributedBody | associated_message_type | Chat | Notes                              |
+|------:|-----------:|----------:|-------------|-------|----------------|------------------------:|-----:|------------------------------------|
+| 1     | 1          | NULL      | nanoseconds | NULL  | hex blob       | 0                       | 1    | Modern sent — must decode blob     |
+| 2     | 0          | 1         | seconds     | set   | NULL           | 0                       | 1    | Legacy row, seconds time           |
+| 3     | 0          | 3         | nanoseconds | set   | NULL           | 0                       | 2    | Group, received from contact B     |
+| 4     | 0          | 1         | nanoseconds | NULL  | NULL           | 2000                    | 2    | Tapback — must be filterable out   |
+| 200   | 1          | NULL      | nanoseconds | NULL  | hex blob       | 0                       | 1    | Length-prefix bug — digit '2' (50) |
+| 201   | 1          | NULL      | nanoseconds | NULL  | hex blob       | 0                       | 1    | Length-prefix bug — letter 'A' (65)|
 
 ### Gotchas exercised
 
@@ -56,6 +58,14 @@ contact-merge logic should collapse them.
 - [x] **Seconds date** (legacy) — row 2: `298_296_000` = 2010-06-15 12:00:00 UTC.
 - [x] **Two handles for the same contact** — handles 1 (`+15551234567`) and 2
       (`friend@example.com`), both in chat 1.
+- [x] **Typedstream length-prefix leak — digit branch** — row 200. Blob has a
+      `0x32` (= ASCII `'2'`) length byte followed by exactly 50 ASCII bytes.
+      Naive lossy-UTF-8 decode would yield `"2xxxxx…"`; decoder must strip
+      the leading `'2'`.
+- [x] **Typedstream length-prefix leak — letter branch** — row 201. Blob has a
+      `0x41` (= ASCII `'A'`) length byte followed by exactly 65 ASCII bytes.
+      Tests the broadened printable-ASCII (not just digits) heuristic in
+      `AttributedBodyDecoder.stripLengthPrefix`.
 
 ### Notes on the attributedBody blob (row 1)
 
