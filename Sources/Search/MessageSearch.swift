@@ -48,17 +48,23 @@ public struct MessageSearch: Sendable {
         /// AppleScript-based jump-to-chat lookups; `nil` if the row didn't
         /// carry one (very old DBs).
         public let chatGUID: String?
+        /// Reactions on this message, oldest first. Populated by
+        /// `MessageSearch.search` via a single batched `ReactionLoader` call
+        /// after the main result query — never N+1.
+        public let reactions: [Reaction]
 
         public init(
             message: Message,
             partnerName: String,
             senderName: String,
-            chatGUID: String? = nil
+            chatGUID: String? = nil,
+            reactions: [Reaction] = []
         ) {
             self.message = message
             self.partnerName = partnerName
             self.senderName = senderName
             self.chatGUID = chatGUID
+            self.reactions = reactions
         }
     }
 
@@ -123,6 +129,7 @@ public struct MessageSearch: Sendable {
         let (chatSQL, chatArgs) = Self.chatClause(parsed.chatFilters)
         let (fromSQL, fromArgs) = Self.fromClause(parsed.fromFilters, contacts: contacts)
         let (toSQL, toArgs) = Self.toClause(parsed.toFilters, contacts: contacts)
+        let (reactionsSQL, reactionsArgs) = Self.reactionsClause(parsed.reactionFilters)
         let limitSQL = limit.map { _ in "LIMIT ?" } ?? ""
         let sql = """
             SELECT
@@ -148,6 +155,7 @@ public struct MessageSearch: Sendable {
               \(chatSQL)
               \(fromSQL)
               \(toSQL)
+              \(reactionsSQL)
             ORDER BY m.date DESC
             \(limitSQL)
             """
@@ -157,6 +165,7 @@ public struct MessageSearch: Sendable {
         args.append(contentsOf: chatArgs)
         args.append(contentsOf: fromArgs)
         args.append(contentsOf: toArgs)
+        args.append(contentsOf: reactionsArgs)
         if let limit { args.append(limit) }
 
         let rows: [Row] = try database.dbQueue.read { db in
@@ -254,10 +263,121 @@ public struct MessageSearch: Sendable {
             ))
         }
 
+        // Batched reaction load — ONE SQL query for the entire result set.
+        // We collect every target GUID, hand them to `ReactionLoader`, and
+        // splice reactions back onto each result. No N+1 in sight.
+        //
+        // Pre-MVP: search has no concept of "include reactions" toggle — we
+        // always load them, since the UI now wants them on every row. If
+        // perf becomes a problem on huge result sets we'd add a flag here;
+        // the typical panel result is ≤ 200 rows so it's fine.
+        let guids = results.compactMap { $0.message.guid }
+        let reactionMap: [String: [Reaction]]
+        if guids.isEmpty {
+            reactionMap = [:]
+        } else {
+            // Failures load empty rather than failing the whole search —
+            // a broken reaction subquery shouldn't kill the user's search.
+            reactionMap = (try? ReactionLoader.reactions(
+                forTargetGUIDs: guids,
+                database: database,
+                contacts: contacts
+            )) ?? [:]
+        }
+        if !reactionMap.isEmpty {
+            results = results.map { r in
+                guard let guid = r.message.guid,
+                      let rxns = reactionMap[guid], !rxns.isEmpty else { return r }
+                return Result(
+                    message: r.message,
+                    partnerName: r.partnerName,
+                    senderName: r.senderName,
+                    chatGUID: r.chatGUID,
+                    reactions: rxns
+                )
+            }
+        }
+
         return results
     }
 
     // MARK: - Helpers
+
+    /// One reaction-related filter parsed from a `reactions:` token.
+    ///
+    /// Three flavors:
+    /// - `.count(.greaterEqual, 3)` — count comparator
+    /// - `.any` — at least 1 reaction (sugar for `.count(.greaterEqual, 1)`)
+    /// - `.kind(.love)` — at least one reaction of the named type
+    ///
+    /// Multiple filters AND together at SQL time. `reactions:>=3 reactions:love`
+    /// means "at least 3 total reactions AND at least one is a love".
+    public enum ReactionFilter: Sendable, Equatable {
+
+        public enum Comparator: String, Sendable, Equatable {
+            case greaterEqual = ">="
+            case lessEqual = "<="
+            case greater = ">"
+            case less = "<"
+            case equal = "="
+        }
+
+        /// Match by name. We only allow the *named* tapback kinds — the
+        /// custom-emoji (`2006`) and sticker (`2007`) types don't have a
+        /// stable user-facing keyword, so they're not addressable here.
+        public enum Kind: String, Sendable, Equatable, CaseIterable {
+            case love, like, laugh, emphasize, question, dislike
+
+            /// The `associated_message_type` value this name maps to.
+            public var typeValue: Int {
+                switch self {
+                case .love: return 2000
+                case .like: return 2001
+                case .dislike: return 2002
+                case .laugh: return 2003
+                case .emphasize: return 2004
+                case .question: return 2005
+                }
+            }
+        }
+
+        case count(Comparator, Int)
+        case any
+        case kind(Kind)
+
+        /// Parse the value side of `reactions:<value>`. Returns nil if the
+        /// value isn't one of the recognized shapes — the caller drops the
+        /// token (it stays in `freeText` so the user isn't punished for a
+        /// typo).
+        public static func parse(_ value: String) -> ReactionFilter? {
+            let trimmed = value.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !trimmed.isEmpty else { return nil }
+            if trimmed == "any" { return .any }
+            if let kind = Kind(rawValue: trimmed) { return .kind(kind) }
+            // Comparator shapes: ">=N", "<=N", ">N", "<N", "=N", or bare "N".
+            // Order matters — check 2-char prefixes before 1-char.
+            let comparators: [(String, Comparator)] = [
+                (">=", .greaterEqual),
+                ("<=", .lessEqual),
+                (">", .greater),
+                ("<", .less),
+                ("=", .equal),
+            ]
+            for (sym, cmp) in comparators {
+                if trimmed.hasPrefix(sym) {
+                    let rest = trimmed.dropFirst(sym.count)
+                    if let n = Int(rest), n >= 0 {
+                        return .count(cmp, n)
+                    }
+                    return nil
+                }
+            }
+            if let n = Int(trimmed), n >= 0 {
+                return .count(.equal, n)
+            }
+            return nil
+        }
+    }
 
     /// Parsed structured query.
     ///
@@ -269,6 +389,8 @@ public struct MessageSearch: Sendable {
         public let fromFilters: [String]
         public let toFilters: [String]
         public let dateRange: ClosedRange<Date>?
+        /// Reaction-thresholds + kind filters parsed from `reactions:` tokens.
+        public let reactionFilters: [ReactionFilter]
         /// The tokens we recognized, in order, with their original spelling.
         /// Used by the UI to highlight active filters inline.
         public let tokens: [Token]
@@ -279,6 +401,7 @@ public struct MessageSearch: Sendable {
             fromFilters: [String] = [],
             toFilters: [String] = [],
             dateRange: ClosedRange<Date>? = nil,
+            reactionFilters: [ReactionFilter] = [],
             tokens: [Token] = []
         ) {
             self.freeText = freeText
@@ -286,6 +409,7 @@ public struct MessageSearch: Sendable {
             self.fromFilters = fromFilters
             self.toFilters = toFilters
             self.dateRange = dateRange
+            self.reactionFilters = reactionFilters
             self.tokens = tokens
         }
     }
@@ -320,6 +444,7 @@ public struct MessageSearch: Sendable {
         var tos: [String] = []
         var dateRanges: [ClosedRange<Date>] = []
         var dateInstants: [(TokenPrefix, Date)] = []
+        var reactionFilters: [ReactionFilter] = []
         var recognized: [Token] = []
 
         for token in tokens {
@@ -344,6 +469,17 @@ public struct MessageSearch: Sendable {
                 froms.append(raw)
             case .to:
                 tos.append(raw)
+            case .reactions:
+                if let f = ReactionFilter.parse(raw) {
+                    reactionFilters.append(f)
+                } else {
+                    // Unrecognized reactions value — treat the WHOLE token as
+                    // free text so the user sees what they typed survive into
+                    // results (matches how `foo:bar` falls through).
+                    if !freeText.isEmpty { freeText.append(" ") }
+                    freeText.append(String(phrase[token.range]))
+                    continue
+                }
             case .before, .after, .on, .last:
                 if let expr = DateParser.parse(raw, now: now) {
                     switch expr {
@@ -391,6 +527,7 @@ public struct MessageSearch: Sendable {
             fromFilters: froms,
             toFilters: tos,
             dateRange: combined,
+            reactionFilters: reactionFilters,
             tokens: recognized
         )
     }
@@ -633,6 +770,81 @@ public struct MessageSearch: Sendable {
             args.append(Data(upper.utf8))
         }
         return ("AND " + clauses.joined(separator: " AND "), args)
+    }
+
+    /// Build the reactions predicate.
+    ///
+    /// Reactions live in the same `message` table — they're rows where
+    /// `associated_message_type` is in 2000-2999. To filter a target message
+    /// by its reaction count or kinds, we use a correlated subquery against
+    /// `message` itself, matching by stripped `associated_message_guid`.
+    ///
+    /// The join key — `associated_message_guid` strips a `p:N/` or `bp:`
+    /// prefix in real-world rows. We push the strip down into SQL with two
+    /// `REPLACE` calls and a `LIKE` fallback, then compare to `m.guid`.
+    ///
+    /// SQL shape for a single `.count(>=, 3)` filter:
+    /// ```
+    /// AND (
+    ///   SELECT COUNT(*) FROM message r
+    ///   WHERE r.associated_message_type BETWEEN 2000 AND 2999
+    ///     AND (r.associated_message_guid = m.guid
+    ///       OR r.associated_message_guid = 'p:0/' || m.guid
+    ///       OR r.associated_message_guid LIKE '%' || m.guid)
+    /// ) >= 3
+    /// ```
+    ///
+    /// For `.kind(.love)` we add `AND r.associated_message_type = 2000` and
+    /// require count > 0.
+    ///
+    /// Multiple filters AND together (each becomes its own subquery
+    /// predicate). For typical input — `reactions:>=3 reactions:love` — that
+    /// means: at least 3 total AND at least one love.
+    ///
+    /// Empty input → no predicate.
+    ///
+    /// **Performance note**: each `reactions:` filter adds one correlated
+    /// subquery per candidate row. The reaction subset of the DB is small
+    /// (~5% of messages typically), so the subquery is fast. If a user
+    /// stacks many `reactions:` filters on a multi-million-row DB this
+    /// could be slow — fine for v1.
+    static func reactionsClause(_ filters: [ReactionFilter]) -> (String, [DatabaseValueConvertible]) {
+        guard !filters.isEmpty else { return ("", []) }
+        var clauses: [String] = []
+        var args: [DatabaseValueConvertible] = []
+        for filter in filters {
+            // Common subquery template — the join key match condition and
+            // the type range. The `m.guid IS NOT NULL` guard prevents matching
+            // every NULL-GUID row to the empty-prefix tapbacks (rare but
+            // possible in very old DBs).
+            let baseSub = """
+                SELECT COUNT(*) FROM message r
+                WHERE r.associated_message_type BETWEEN 2000 AND 2999
+                  AND m.guid IS NOT NULL
+                  AND (
+                      r.associated_message_guid = m.guid
+                   OR r.associated_message_guid = 'p:0/' || m.guid
+                   OR r.associated_message_guid = 'bp:' || m.guid
+                   OR r.associated_message_guid LIKE '%' || m.guid
+                  )
+                """
+            switch filter {
+            case .count(let cmp, let n):
+                clauses.append("((\(baseSub)) \(cmp.rawValue) ?)")
+                args.append(n)
+            case .any:
+                // Sugar for count >= 1.
+                clauses.append("((\(baseSub)) >= 1)")
+            case .kind(let kind):
+                // Same base but additionally constrained to one type value,
+                // and we require count > 0.
+                let typed = baseSub + " AND r.associated_message_type = ?"
+                clauses.append("((\(typed)) >= 1)")
+                args.append(kind.typeValue)
+            }
+        }
+        if clauses.isEmpty { return ("", []) }
+        return ("AND (" + clauses.joined(separator: " AND ") + ")", args)
     }
 
     /// Build the date predicate. Handles the nanoseconds-OR-seconds case from

@@ -47,6 +47,10 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
     case after = "after:"
     case on = "on:"
     case last = "last:"
+    /// Reaction filter — accepts comparators (`>=3`, `<=1`, `>0`, `5`),
+    /// the literal `any`, or a kind name (`love`, `like`, `laugh`,
+    /// `emphasize`, `question`, `dislike`). See `MessageSearch.parseQuery`.
+    case reactions = "reactions:"
 
     /// Display category for tinting/icons in the chip layer.
     public var category: TokenCategory {
@@ -54,6 +58,7 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
         case .chat, .in: return .chat
         case .from, .to: return .person
         case .before, .after, .on, .last: return .date
+        case .reactions: return .reaction
         }
     }
 
@@ -69,7 +74,7 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
 
 /// Coarse-grained category for chip tinting in the UI.
 public enum TokenCategory: Sendable, Hashable {
-    case chat, person, date
+    case chat, person, date, reaction
 }
 
 public enum QueryAutocomplete {

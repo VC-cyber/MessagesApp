@@ -69,6 +69,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
     case dateRange
     case chat
     case freeText
+    case reaction
 
     var tint: Color {
         switch self {
@@ -76,6 +77,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
         case .dateRange: return .purple
         case .chat: return .orange
         case .freeText: return .gray
+        case .reaction: return .pink
         }
     }
 
@@ -85,6 +87,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
         case .dateRange: return "calendar"
         case .chat: return "bubble.left.and.bubble.right"
         case .freeText: return "text.magnifyingglass"
+        case .reaction: return "heart.fill"
         }
     }
 }

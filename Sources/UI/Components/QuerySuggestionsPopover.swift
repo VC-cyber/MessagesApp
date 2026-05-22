@@ -41,6 +41,7 @@ struct QuerySuggestion: Identifiable, Hashable {
         case chat
         case person
         case date
+        case reaction
     }
 }
 
@@ -134,6 +135,7 @@ private struct SuggestionRow: View {
         case .chat: return "bubble.left.and.bubble.right"
         case .person: return "person.crop.circle"
         case .date: return "calendar"
+        case .reaction: return "heart.fill"
         }
     }
 
@@ -142,6 +144,7 @@ private struct SuggestionRow: View {
         case .chat: return .orange
         case .person: return .blue
         case .date: return .purple
+        case .reaction: return .pink
         }
     }
 }

@@ -23,6 +23,15 @@ public enum QuerySuggestionsProvider {
         "2026", "2025", "2024", "2023",
     ]
 
+    /// Fixed reaction suggestions. Threshold comparators come first (these
+    /// are the most useful — "show me the messages with lots of reactions"),
+    /// then the named kinds.
+    static let reactionSuggestions: [String] = [
+        ">=1", ">=3", ">=5", ">=10",
+        "any",
+        "love", "like", "laugh", "emphasize", "question", "dislike",
+    ]
+
     /// Build the suggestion list. Returns an empty list when the context
     /// can't be completed (or the partial value matches nothing).
     /// Internal visibility — `QuerySuggestion` (declared in
@@ -41,6 +50,8 @@ public enum QuerySuggestionsProvider {
             return personSuggestions(partial: context.partialValue, contacts: contacts)
         case .before, .after, .on, .last:
             return dateSuggestions(partial: context.partialValue)
+        case .reactions:
+            return reactionSuggestions(partial: context.partialValue)
         }
     }
 
@@ -88,6 +99,32 @@ public enum QuerySuggestionsProvider {
         let ranked = QueryAutocomplete.rank(dateSuggestions, partial: partial, limit: maxSuggestions)
         return ranked.enumerated().map { idx, value in
             QuerySuggestion(id: idx, value: value, kind: .date, subtitle: nil)
+        }
+    }
+
+    // MARK: - reactions
+
+    static func reactionSuggestions(partial: String) -> [QuerySuggestion] {
+        let ranked = QueryAutocomplete.rank(reactionSuggestions, partial: partial, limit: maxSuggestions)
+        return ranked.enumerated().map { idx, value in
+            QuerySuggestion(id: idx, value: value, kind: .reaction, subtitle: subtitle(forReaction: value))
+        }
+    }
+
+    private static func subtitle(forReaction value: String) -> String? {
+        switch value {
+        case ">=1": return "at least 1 reaction"
+        case ">=3": return "at least 3 reactions"
+        case ">=5": return "at least 5 reactions"
+        case ">=10": return "at least 10 reactions"
+        case "any": return "messages with any reaction"
+        case "love": return "❤️ loved"
+        case "like": return "👍 liked"
+        case "laugh": return "😂 laughed"
+        case "emphasize": return "‼️ emphasized"
+        case "question": return "❓ questioned"
+        case "dislike": return "👎 disliked"
+        default: return nil
         }
     }
 }

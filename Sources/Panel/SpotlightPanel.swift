@@ -38,6 +38,7 @@ struct SpotlightPanel: View {
             case .chat: category = .chat
             case .person: category = .person
             case .date: category = .dateRange
+            case .reaction: category = .reaction
             }
             out.append(.init(category: category, label: literal))
         }
