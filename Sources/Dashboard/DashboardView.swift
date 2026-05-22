@@ -229,13 +229,11 @@ struct DashboardView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                Text("Better Messages needs Full Disk Access to read your iMessage history. Open System Settings → Privacy & Security → Full Disk Access, enable Better Messages, and relaunch.")
+                Text("Better Messages needs Full Disk Access to read your iMessage history. Click the button — Finder will reveal Better Messages.app; drag it into the Full Disk Access list, enable, then relaunch.")
                     .font(.callout)
                     .foregroundStyle(.primary)
-                Button("Open System Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                        NSWorkspace.shared.open(url)
-                    }
+                Button("Grant Full Disk Access") {
+                    openFullDiskAccessSettingsAndRevealApp()
                 }
                 .buttonStyle(.borderedProminent)
             }

@@ -341,13 +341,15 @@ struct SpotlightPanel: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button("Open System Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                    NSWorkspace.shared.open(url)
-                }
+            Button("Grant Full Disk Access") {
+                openFullDiskAccessSettingsAndRevealApp()
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
+            Text("Drag Better Messages from Finder into the Full Disk Access list, then relaunch.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Space.xl)
