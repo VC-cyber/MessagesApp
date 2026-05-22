@@ -126,7 +126,7 @@ public struct MessageSearch: Sendable {
 
         let (dateSQL, dateArgs) = Self.dateClause(combinedRange)
         let (phraseSQL, phraseArgs) = Self.phraseClause(needles)
-        let (chatSQL, chatArgs) = Self.chatClause(parsed.chatFilters)
+        let (chatSQL, chatArgs) = Self.chatClause(parsed.chatFilters, contacts: contacts)
         let (fromSQL, fromArgs) = Self.fromClause(parsed.fromFilters, contacts: contacts)
         let (toSQL, toArgs) = Self.toClause(parsed.toFilters, contacts: contacts)
         let (reactionsSQL, reactionsArgs) = Self.reactionsClause(parsed.reactionFilters)
@@ -609,13 +609,61 @@ public struct MessageSearch: Sendable {
     /// Build the chat predicate. Each filter does a case-insensitive substring
     /// match on `chat.display_name`. Filters AND together (every named chat
     /// must match — uncommon but consistent with how phrase needles AND).
-    static func chatClause(_ filters: [String]) -> (String, [DatabaseValueConvertible]) {
+    /// Build the chat-filter predicate.
+    ///
+    /// A chat matches `in:value` (case-insensitive substring) if ANY of:
+    /// 1. `chat.display_name` contains the substring — covers named group chats.
+    /// 2. The chat has a participant resolved to a contact whose `displayName`
+    ///    contains the substring — covers 1:1 chats (which always have empty
+    ///    `display_name`) and unnamed groups when the user types a contact name.
+    ///    Uses `resolveHandles` — the same helper `from:`/`to:` use.
+    /// 3. The chat has a participant whose raw `handle.id` contains the
+    ///    substring — covers e.g. `in:hoogar` matching the handle
+    ///    `keeshant.hoogar@gmail.com` even when there's no contact entry.
+    ///
+    /// Multiple `in:` filters AND together. Within each filter, the three
+    /// match conditions OR together.
+    static func chatClause(
+        _ filters: [String],
+        contacts: ResolvedContacts
+    ) -> (String, [DatabaseValueConvertible]) {
         guard !filters.isEmpty else { return ("", []) }
         var clauses: [String] = []
         var args: [DatabaseValueConvertible] = []
         for filter in filters {
-            clauses.append("ch.display_name LIKE ?")
+            var orParts: [String] = []
+
+            // (1) Group display_name substring.
+            orParts.append("ch.display_name LIKE ?")
             args.append("%\(filter)%")
+
+            // (2) Contact-resolved participant.
+            let resolved = resolveHandles(forFilter: filter, contacts: contacts)
+            if !resolved.isEmpty {
+                let placeholders = Array(repeating: "?", count: resolved.count).joined(separator: ", ")
+                orParts.append("""
+                    ch.ROWID IN (
+                        SELECT chj.chat_id
+                        FROM chat_handle_join chj
+                        JOIN handle ph ON ph.ROWID = chj.handle_id
+                        WHERE ph.id IN (\(placeholders))
+                    )
+                    """)
+                for h in resolved { args.append(h) }
+            }
+
+            // (3) Raw handle substring.
+            orParts.append("""
+                ch.ROWID IN (
+                    SELECT chj.chat_id
+                    FROM chat_handle_join chj
+                    JOIN handle ph ON ph.ROWID = chj.handle_id
+                    WHERE ph.id LIKE ?
+                )
+                """)
+            args.append("%\(filter)%")
+
+            clauses.append("(" + orParts.joined(separator: " OR ") + ")")
         }
         return ("AND (" + clauses.joined(separator: " AND ") + ")", args)
     }
