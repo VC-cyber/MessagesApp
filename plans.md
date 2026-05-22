@@ -367,6 +367,29 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — features-agent (private IPC for GUID jump — exhaustive negative result)
+- **8 hypotheses tested empirically**, each with a probe in `scripts/probes/` and real GUIDs from the user's chat.db. Documented in `docs/messages-private-ipc.md`. All probes verified against a sentinel chat (`Beck Peterson`) — its window title never changed under any private-IPC path.
+- **Hypotheses ruled out**:
+  1. `_automation_*` selectors — state-mutators on imagent, not UI drivers. Prior agent misread.
+  2. Apple Event `'aevt'/'GURL'` with `x-apple-appintents://` URL — reply `errn:-1708` (`errAEEventNotHandled`). Messages.app receives the event but the scheme is ignored.
+  3. `NSUserActivity.becomeCurrent()` with `com.apple.Messages` + IMCore continuity keys — makes the activity OUR process's current activity, not Messages.app's. Continuity delivery needs Handoff or a Spotlight tap.
+  4. `dlopen` native macOS IMCore — loads cleanly, `IMChatRegistry`/`IMChat`/`IMMessage` instantiable, but talks to imagent (the daemon), NOT Messages.app's UI process. Useful for chat.db cross-checking, useless for reveal.
+  5. `dlopen` iOSSupport ChatKit/IMCore — fails with "wrong platform to load into process". Catalyst frameworks can't be linked from a native macOS bundle.
+  6. Distributed/Darwin notifications (`CKEmphasizeBalloonAtIndexPathNotification`, `com.apple.imessage.openChat`, etc.) — no effect on Messages.app.
+  7. Parameterized AX attributes on Messages.app — only `AXReplaceRangeWithText` + text-marker attrs. No GUID-parameterized attribute exists.
+  8. **`LNAction` + `LNApplicationConnection` + `LNActionExecutor` SPI** — structurally correct! Built end-to-end:
+     ```objc
+     LNAction(identifier: "OpenMessageIntent",
+              mangledTypeName: "7ChatKit17OpenMessageIntentV",
+              openAppWhenRun: YES,
+              parameters: [LNParameter(target: MessageEntity(GUID))])
+     ```
+     `LNApplicationConnection initWithBundleIdentifier:@"com.apple.MobileSMS"` returns a real connection. `[executor perform]` completes without error. **But Messages.app silently does nothing** because the XPC dispatcher requires entitlement `com.apple.private.appintents.exception.allow-foreign-bundle-identifiers` (or `…allowed-bundle-identifiers`). Apple grants these to specific licensees; not available to third-party apps. The mach service `com.apple.private.appintents.delegate.com.apple.MobileSMS` is not published to unentitled clients.
+- **Bottom line**: `ChatKit.OpenMessageIntent` IS the right intent for what we want. Apple's dispatch path IS correctly identifiable. We cannot use it from a third-party bundle.
+- **Implementation**: NO production code changed. `Sources/Reveal/MessagesGUIDReveal.swift` is unchanged. The full LNAction pipeline is in `scripts/probes/probe-lnconn-perform.m` so it's ready to lift into `tryPrivateJump` if we ever ship as an entitled Apple-signed extension.
+- **Tests**: `./scripts/test.sh` ✅, `./scripts/build.sh` ✅. No new XCTests — probes require running Messages.app + AX permission, not CI-runnable.
+- **Recommended Plan B (lead to ship)**: iterative `AXScrollUpByPage` loop in `MessagesGUIDReveal.scrollToMessage(matchingDescriptionNeedles:)` — repeatedly page Messages.app's `TranscriptCollectionView` upward until either the target bubble appears in the AX tree or a sane bound (~50 pages / 5 seconds) hits. Closes the lazy-load gap (the user's reported bug) without privileged IPC. ~50 lines.
+
 ### 2026-05-22 — features-agent (dashboard)
 - New `Sources/Dashboard/` module: `DashboardView`, `DashboardViewModel`, `DashboardLoader`, `DashboardStats`, plus components (`StatPanel`, `TopList`, `WindowSelector`, `FrequencyChart`). New `Window("Dashboard", id: WindowID.dashboard)` scene in `BetterMessagesApp.swift`; new "Dashboard…" menu bar item.
 - Layout: header strip with 4 stat tiles (total / sent / received / conversations + date span) → 30d/12m/All segmented selector → Swift-Charts frequency chart (sent + received) → side-by-side Top People (12, by total exchanged, 1:1 only) and Top Groups (12, by your sent count). Uses existing `GlassCard`, design tokens, and `.containerBackground(.thinMaterial, for: .window)`.
