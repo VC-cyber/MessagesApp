@@ -116,6 +116,11 @@ struct ResultRow: View {
                     )
             }
             Spacer(minLength: 0)
+            // Reaction badges sit immediately before the timestamp. They take
+            // their natural width; the timestamp anchors the trailing edge.
+            if !message.reactions.isEmpty {
+                ReactionCluster(reactions: message.reactions)
+            }
             Text(message.timestamp, format: .relative(presentation: .named))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)

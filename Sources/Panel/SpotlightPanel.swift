@@ -391,7 +391,7 @@ private struct SpotlightResultRow: View {
             HStack(alignment: .top, spacing: Space.md) {
                 avatar
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack {
+                    HStack(spacing: Space.xs) {
                         Text(result.senderName)
                             .font(.subheadline.weight(.semibold))
                         if !result.partnerName.isEmpty, result.partnerName != result.senderName {
@@ -400,6 +400,12 @@ private struct SpotlightResultRow: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        // Reaction cluster sits on the trailing edge, BEFORE the
+                        // timestamp — keeps timestamp at the far edge as the
+                        // anchor element, with reactions clustering toward it.
+                        if !result.reactions.isEmpty {
+                            ReactionCluster(reactions: result.reactions)
+                        }
                         Text(timestamp)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
