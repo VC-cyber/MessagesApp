@@ -21,7 +21,7 @@
 - (void)setMediatorConnection:(id)c;
 @end
 
-#define LOG(...) do { fLOG(stderr, __VA_ARGS__); fflush(stderr); } while(0)
+#define LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
 
 int main(int argc, const char *argv[]) {
     if (argc < 3) {
@@ -93,15 +93,10 @@ int main(int argc, const char *argv[]) {
     }
     LOG("connOpts: %s\n", [[connOpts description] UTF8String] ?: "(nil)");
 
-    // Some connections need explicit connectWithOptions
-    if ([conn respondsToSelector:@selector(connectWithOptions:)]) {
-        @try {
-            BOOL connected = [conn connectWithOptions:connOpts];
-            LOG("connectWithOptions: %d\n", connected);
-        } @catch (NSException *e) {
-            LOG("connectWithOptions exception: %s\n", [[e description] UTF8String]);
-        }
-    }
+    // Skip explicit connectWithOptions — it triggers SIGTRAP because it needs a real
+    // mediator connection set up. The connection is lazy — executorForAction should
+    // initialize it on demand.
+    LOG("Skipping explicit connectWithOptions\n");
 
     // --- Create executor options ---
     id execOpts = [[LNExecOptsClass alloc] init];
