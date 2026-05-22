@@ -367,6 +367,17 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — codex (message-level reveal research)
+- User asked for the most testable path to reveal a Messages.app message by `(messageGUID, chatGUID)` without body matching, including attachment-only/image-only messages.
+- Local Tahoe inspection found:
+  - `IMDPersistenceAgent.xpc` exists but its `Info.plist` `_AllowedClients` is Apple-code-signing gated (`com.apple.MobileSMS.spotlight`, `imagent`, Safari, Assistant, etc.), so a third-party app should not expect direct XPC access.
+  - `imagent` exposes Mach service `com.apple.corespotlight.daemon.messages`; Messages.app has `CoreSpotlightContinuation = true`; Apple’s Spotlight path is real but probably not a public jump RPC.
+  - Messages.app is Catalyst and links `/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework`.
+  - ChatKit App Intents metadata at `/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/Resources/Metadata.appintents/extract.actionsdata` contains hidden `ChatKit.OpenMessageIntent` with summary `Reveal ${target}`, `openAppWhenRun = true`, and target `MessageEntity`.
+  - `MessageEntity` is both `Indexed` and `URLRepresentable`; properties include `GUID`, `transferGUID`, `conversation`, `attachments`, `customAttachments`, `locations`, `links`, `reaction`, and `referencedMessage`, which matches the requirement to handle non-text messages.
+  - User container `~/Library/Containers/com.apple.MobileSMS.spotlight` exists. Quick inspection only found `Data/Library/Preferences/com.apple.IMCoreSpotlight.plist` with `IMCSNeedsDeferredIndexing = true`; no obvious reusable local index file in `Application Support` or `Caches`.
+- Recommendation for next implementation spike: try invoking/abusing the App Intents/OpenEntity path first, then CoreSpotlight continuation, before deeper IMCore/XPC work. Direct IMCore can load/mark messages by GUID but does not by itself control Messages.app UI state.
+
 ### 2026-05-22 — lead (search recency + scope bugfix)
 - **Bug**: searching "cactus" returned nothing despite the user having recent cactus-related messages. Other queries returned only old results.
 - **Root cause** in `MessageSearch.search`: `ORDER BY m.date ASC` + `LIMIT 5000` fetched the 5000 *oldest* messages, then Swift filtered by phrase. Anything from the last few years never entered the candidate window. No SQL pre-filter on the phrase meant we were also wasting the limit on rows that don't match the query at all.
