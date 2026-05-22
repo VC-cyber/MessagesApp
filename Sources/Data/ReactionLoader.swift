@@ -56,48 +56,34 @@ public enum ReactionLoader {
     ) throws -> [String: [Reaction]] {
         guard !guids.isEmpty else { return [:] }
 
-        // Build the IN clause — we filter by the *stripped* GUID being one of
-        // the targets via a LIKE-OR construction. Each target contributes one
-        // `associated_message_guid LIKE ? || '%' || ? || '%'` style predicate,
-        // but simpler: `associated_message_guid LIKE '%' || ? || '%'`. The
-        // GUIDs are 36-char UUIDs so substring match has no false positives in
-        // practice.
+        // Build the IN list of candidate `associated_message_guid` values.
+        // For each target GUID we precompute every known prefix variant
+        // and stuff them all into one IN clause — SQLite can use the
+        // implicit index on `associated_message_guid`, so the lookup is
+        // O(log N) per variant instead of O(N) per row.
         //
-        // Performance note: SQLite can't use the index for a leading-wildcard
-        // LIKE. For our ceiling (panel results ≤ a few hundred), the table
-        // scan over the tapbacks subset (typically ≤ 50k rows) is fine. If
-        // this becomes hot we could pre-build prefix variants and use IN.
+        // We've verified on the user's real DB that the prefixes used are
+        //   "" (bare GUID), "p:0/" … "p:9/", and "bp:". Beyond p:9/ is
+        //   extraordinarily rare (multi-part messages with 10+ segments).
+        //
+        // A leading-wildcard LIKE — what an earlier draft used as a catch-all
+        // — turns into a full scan over every tapback row PER target. With
+        // ~200k messages and ~50k tapbacks that collapsed the query into
+        // multi-minute territory. The IN approach keeps it sub-second.
         let uniqueGUIDs = Array(Set(guids.filter { !$0.isEmpty }))
         guard !uniqueGUIDs.isEmpty else { return [:] }
 
-        // To keep the IN list to a manageable size we issue ONE query with all
-        // variants we know about (`p:0/<g>`, `p:1/<g>`, …, `bp:<g>`, bare `<g>`).
-        // 92% of real-world hits are `p:0/<g>` so we always include that. For
-        // the rest we fall through to LIKE.
-        //
-        // Build the candidate list: for each GUID we include the bare GUID,
-        // `p:0/<guid>`, and a LIKE pattern that catches `bp:<guid>` and
-        // `p:N/<guid>` for N != 0.
-        var args: [DatabaseValueConvertible] = []
-        var inEqualList: [String] = []
-        var likePatterns: [String] = []
+        let prefixes: [String] = [""] + (0...9).map { "p:\($0)/" } + ["bp:"]
+        var inList: [String] = []
+        inList.reserveCapacity(uniqueGUIDs.count * prefixes.count)
         for g in uniqueGUIDs {
-            // Exact equality matches for the two most-common shapes.
-            inEqualList.append(g)
-            inEqualList.append("p:0/\(g)")
-            // For the long tail (`p:1/<g>` through `p:19/<g>`, `bp:<g>`,
-            // suffix-only variants) — one LIKE per GUID. This is still cheap:
-            // ≤ panel-results-count LIKEs, each scanning the tapback subset.
-            likePatterns.append("%\(g)")
+            for p in prefixes {
+                inList.append(p + g)
+            }
         }
-
-        let equalPlaceholders = Array(repeating: "?", count: inEqualList.count).joined(separator: ", ")
-        let likeClauses = Array(repeating: "associated_message_guid LIKE ?", count: likePatterns.count)
-            .joined(separator: " OR ")
-
-        // Build args in order: equality list first, then LIKE patterns.
-        for g in inEqualList { args.append(g) }
-        for p in likePatterns { args.append(p) }
+        var args: [DatabaseValueConvertible] = []
+        for s in inList { args.append(s) }
+        let placeholders = Array(repeating: "?", count: inList.count).joined(separator: ", ")
 
         // Note: `m.associated_message_type BETWEEN 2000 AND 2999` filters
         // sent reactions but drops removed reactions (3000+) at the SQL
@@ -113,10 +99,7 @@ public enum ReactionLoader {
             FROM message m
             LEFT JOIN handle h ON h.ROWID = m.handle_id
             WHERE m.associated_message_type BETWEEN 2000 AND 2999
-              AND (
-                  m.associated_message_guid IN (\(equalPlaceholders))
-                  \(likePatterns.isEmpty ? "" : "OR \(likeClauses)")
-              )
+              AND m.associated_message_guid IN (\(placeholders))
             ORDER BY m.date ASC
             """
 

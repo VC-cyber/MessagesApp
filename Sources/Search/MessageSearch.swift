@@ -776,57 +776,66 @@ public struct MessageSearch: Sendable {
     ///
     /// Reactions live in the same `message` table — they're rows where
     /// `associated_message_type` is in 2000-2999. To filter a target message
-    /// by its reaction count or kinds, we use a correlated subquery against
-    /// `message` itself, matching by stripped `associated_message_guid`.
+    /// by reaction count or kind we use a correlated subquery against
+    /// `message` itself, matched on `associated_message_guid`.
     ///
-    /// The join key — `associated_message_guid` strips a `p:N/` or `bp:`
-    /// prefix in real-world rows. We push the strip down into SQL with two
-    /// `REPLACE` calls and a `LIKE` fallback, then compare to `m.guid`.
+    /// The join key is **not** equal to `m.guid` directly — real rows carry
+    /// a positional prefix (`p:N/`, `bp:`). We enumerate the known variants
+    /// in an IN list rather than using `LIKE '%' || m.guid`:
+    ///   - `m.guid` (bare — rare, but does appear)
+    ///   - `'p:0/' || m.guid` (most common, ~92%)
+    ///   - `'p:1/' || m.guid` … `'p:N/' || m.guid` for N up to 9
+    ///   - `'bp:' || m.guid`
+    ///
+    /// A leading-wildcard LIKE turns the subquery into a full scan of every
+    /// tapback row per candidate, which collapsed an empirical real-world DB
+    /// (~200k messages, ~50k tapbacks) into multi-minute query times. The
+    /// IN approach can use the implicit index on `associated_message_guid`
+    /// and stays sub-second.
     ///
     /// SQL shape for a single `.count(>=, 3)` filter:
     /// ```
     /// AND (
     ///   SELECT COUNT(*) FROM message r
     ///   WHERE r.associated_message_type BETWEEN 2000 AND 2999
-    ///     AND (r.associated_message_guid = m.guid
-    ///       OR r.associated_message_guid = 'p:0/' || m.guid
-    ///       OR r.associated_message_guid LIKE '%' || m.guid)
+    ///     AND r.associated_message_guid IN (
+    ///         m.guid, 'p:0/' || m.guid, 'p:1/' || m.guid, …, 'bp:' || m.guid
+    ///     )
     /// ) >= 3
     /// ```
     ///
     /// For `.kind(.love)` we add `AND r.associated_message_type = 2000` and
     /// require count > 0.
     ///
-    /// Multiple filters AND together (each becomes its own subquery
-    /// predicate). For typical input — `reactions:>=3 reactions:love` — that
-    /// means: at least 3 total AND at least one love.
+    /// Multiple filters AND together (each becomes its own subquery).
+    /// `reactions:>=3 reactions:love` ⇒ at least 3 total AND at least one love.
     ///
     /// Empty input → no predicate.
-    ///
-    /// **Performance note**: each `reactions:` filter adds one correlated
-    /// subquery per candidate row. The reaction subset of the DB is small
-    /// (~5% of messages typically), so the subquery is fast. If a user
-    /// stacks many `reactions:` filters on a multi-million-row DB this
-    /// could be slow — fine for v1.
     static func reactionsClause(_ filters: [ReactionFilter]) -> (String, [DatabaseValueConvertible]) {
         guard !filters.isEmpty else { return ("", []) }
+        // Build the IN list of join-key variants. We cover `p:0/` through
+        // `p:9/` (the parts with single-digit indices that we've actually
+        // observed in real-world DBs), `bp:`, and the bare GUID. Beyond
+        // p:9/ is extraordinarily rare (multi-part attachment messages
+        // with 10+ segments are essentially non-existent in iMessage's
+        // history) — if it ever needed expanding we'd add up to 19.
+        let prefixes: [String] = [""] + (0...9).map { "p:\($0)/" } + ["bp:"]
+        let inExpressions = prefixes.map { p in
+            p.isEmpty ? "m.guid" : "'\(p)' || m.guid"
+        }.joined(separator: ", ")
+
         var clauses: [String] = []
         var args: [DatabaseValueConvertible] = []
         for filter in filters {
-            // Common subquery template — the join key match condition and
-            // the type range. The `m.guid IS NOT NULL` guard prevents matching
-            // every NULL-GUID row to the empty-prefix tapbacks (rare but
-            // possible in very old DBs).
+            // Common subquery template — the join key IN list and the
+            // type range. The `m.guid IS NOT NULL` guard prevents matching
+            // every NULL-GUID row to empty-prefix variants on a few very
+            // old rows that have no guid.
             let baseSub = """
                 SELECT COUNT(*) FROM message r
                 WHERE r.associated_message_type BETWEEN 2000 AND 2999
                   AND m.guid IS NOT NULL
-                  AND (
-                      r.associated_message_guid = m.guid
-                   OR r.associated_message_guid = 'p:0/' || m.guid
-                   OR r.associated_message_guid = 'bp:' || m.guid
-                   OR r.associated_message_guid LIKE '%' || m.guid
-                  )
+                  AND r.associated_message_guid IN (\(inExpressions))
                 """
             switch filter {
             case .count(let cmp, let n):
