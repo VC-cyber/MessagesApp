@@ -132,6 +132,20 @@ NSWorkspace.shared.open([entityURL], withApplicationAt: messagesURL, configurati
 }
 Thread.sleep(forTimeInterval: 1.5)
 
+// MARK: - Strategy LS: LSOpenURLsWithRole (raw LaunchServices)
+import CoreServices
+print("\n--- Strategy LS: LSOpenURLsWithRole ---")
+let lsStatus = LSOpenURLsWithRole(
+    [entityURL] as NSArray as CFArray,
+    .all,
+    nil,
+    nil,
+    nil,
+    nil
+)
+print("LSOpenURLsWithRole result: \(lsStatus)")
+Thread.sleep(forTimeInterval: 1.5)
+
 // MARK: - Strategy 5: Try multiple URL variants
 print("\n--- Strategy 5: Variant URLs through NSWorkspace.openURLs ---")
 let variants = [

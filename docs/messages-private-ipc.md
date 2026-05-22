@@ -1,148 +1,356 @@
 # Messages.app private-IPC research (GUID jump)
 
-Empirical investigation of how to reach the `_automation_markAsRead:messageGUID:forChatGUID:fromMe:` (and friends) selectors inside Messages.app from our own process, so we can implement a true "jump to GUID" reveal instead of the current AX-scroll-and-keystroke fallback.
+Empirical investigation of how to reach the `OpenMessageIntent` and related
+private mechanisms inside Messages.app from our own process, so we can implement
+a true "jump to GUID" reveal instead of the current AX-scroll-and-keystroke
+fallback.
 
-macOS 26.5 (Tahoe), Messages.app `1450.500.221.1.7`, IMCore 800.0.0. Testing date 2026-05-22.
+macOS 26.5 (Tahoe), Messages.app `1450.500.221.1.7` (`com.apple.MobileSMS`),
+IMCore `800.0.0`, ChatKit `1450.500.221.1.7`. Testing date 2026-05-22.
 
-This is a companion to `docs/messages-deep-link.md` — that file documents the URL/AX/AppleScript paths (which work, partially); this file documents the lower-level IPC paths (which we want, ideally).
+## Summary (read this first)
 
-## The landscape (high-level — terms first)
+**Conclusion**: There IS a private intent — `ChatKit.OpenMessageIntent` — that
+takes a `MessageEntity` (with the message GUID) and reveals it in Messages.app.
+The metadata is on disk, the URL schema is `x-apple-appintents://com.apple.MobileSMS/MessageEntity/<GUID>`,
+and the dispatch path through `AppIntents.framework`'s `LNAction`/`LNApplicationConnection`
+ObjC bridge **can be constructed end-to-end from our process** — but the actual
+XPC delivery to Messages.app is **gated by a private entitlement** we don't have.
 
-Messages.app on macOS 26 is **not a native AppKit application**. It's an iOS-bridged Catalyst-style app:
+We confirmed all of:
+- The intent exists and is structurally valid (`isDiscoverable: false`, `openAppWhenRun: true`).
+- We can build a valid `LNAction(OpenMessageIntent, target: MessageEntity(GUID))` in our process.
+- We can obtain an `LNApplicationConnection` to `com.apple.MobileSMS`.
+- We can build an `LNActionExecutor` and call `[executor perform]` — it returns without error,
+  but the action is silently dropped because the XPC connection requires entitlements
+  Messages.app's AppIntents mediator demands.
+- `NSWorkspace.open` on the URL representation returns success but Messages.app
+  has no LaunchServices handler for `x-apple-appintents://`.
+- An Apple Event `'aevt'/'GURL'` (kAEGetURL) delivered to Messages.app with the URL
+  string returns errAEEventNotHandled (-1708).
+- Posting plausible `Distributed`/`Darwin` notifications doesn't drive nav.
+- Parameterized AX attributes on Messages.app expose only text-marker operations,
+  not a "jump to message" attribute.
 
-- Bundle ID: `com.apple.MobileSMS` (the iOS Messages app's bundle ID).
-- Main binary links against `/System/iOSSupport/System/Library/PrivateFrameworks/IMCore.framework/IMCore`, `ChatKit.framework`, `IMSharedUtilities.framework` (the **iOS** copies in iOSSupport), plus `Marco.framework`, `FTServices.framework`, `IDSFoundation.framework` (native macOS PrivateFrameworks).
-- Bridges through `Messages.app/Contents/PlugIns/MessagesAppKitBridge.bundle` which provides the AppKit↔UIScene glue (`CKAppKitBridge` class).
-- Uses `UISceneSession` / `CKMessagesSceneDelegate` for its windows.
-- We **cannot load** the iOSSupport copies of IMCore/ChatKit into our own native-macOS process: `dlopen` returns "wrong platform to load into process". (Verified — see Hypothesis 4 below.)
-- But the *native macOS* `/System/Library/PrivateFrameworks/IMCore.framework` **does** dlopen successfully and has the full ObjC class graph (`IMChatRegistry`, `IMChat`, `IMMessage`, `IMDaemonController`, `IMAutomation*`, etc.) — these are the same classes Messages.app uses, just compiled for macOS instead of iOSMac.
+**No implementation changes shipped.** `Sources/Reveal/MessagesGUIDReveal.swift`
+still uses the AX-scroll + keystroke-highlight fallback. The fallback works for
+recent messages but breaks for older messages (Messages.app lazy-loads the
+transcript — see the user's bug report `2026-05-22 — features-agent`). This is
+the gap a working private-IPC path would fill, and we couldn't close it without
+privileged entitlements.
 
-The **daemon backing iMessage** on macOS is **`imagent`** (running as `/System/Library/PrivateFrameworks/IMCore.framework/imagent.app/Contents/MacOS/imagent`, launched from `com.apple.imagent.plist`):
+If/when we sign with an extension entitlement or ship a privileged helper, the
+LNAction path documented below is ready to wire up.
 
+## Architecture: Messages.app on macOS 26
+
+Messages.app is **iOS-bridged Catalyst**, not native AppKit:
+
+- Bundle ID: `com.apple.MobileSMS` (the iOS Messages bundle ID).
+- Main binary links `/System/iOSSupport/System/Library/PrivateFrameworks/{IMCore,ChatKit,IMSharedUtilities}.framework` — the **iOSSupport** copies, not the native macOS ones — plus native `Marco`, `FTServices`, `IDSFoundation`.
+- `Messages.app/Contents/PlugIns/MessagesAppKitBridge.bundle` provides AppKit↔UIScene glue (`CKAppKitBridge` class).
+- Uses `UISceneSession` + `CKMessagesSceneDelegate` for windows.
+- `Info.plist` declares `NSUserActivityTypes = ["com.apple.Messages", "com.apple.Messages.StateRestoration"]` and `CoreSpotlightContinuation = 1`.
+
+**We cannot dlopen the iOSSupport copies of ChatKit/IMCore into our native macOS
+process** — `dlopen` returns "wrong platform to load into process" (verified). The
+native-macOS `/System/Library/PrivateFrameworks/IMCore.framework` **does** load
+and has parallel ObjC classes (`IMChatRegistry`, `IMChat`, `IMMessage`,
+`IMDaemonController`, `IMAutomation*`), but these talk to imagent (the central
+daemon) over XPC — they don't drive Messages.app's UI.
+
+**Messages.app process (PID 767 in this session) registers NO mach service of
+its own.** Verified via `launchctl print pid/767` — `services = {}` is empty.
+Its only inbound RPC surface is Apple Events / URL handling / NSUserActivity,
+all of which go through LaunchServices→UIKit→`CKSceneDelegate scene:openURLContexts:`
+(or `scene:continueUserActivity:`).
+
+### Apple Event flow Messages.app uses for URLs
+
+From `log stream` while we ran `sms://open?groupid=…`:
 ```
-gui/501/com.apple.imagent {
-  MachServices = {
-    "com.apple.aps.imagent" = true
-    "com.apple.corespotlight.daemon.messages" = true
-    "com.apple.imagent.cache-delete" = true
-    "com.apple.imagent.desktop.auth" = true
-    "com.apple.incoming-call-filter-server" = true
-    "com.apple.madrid-idswake" = true
-    "com.apple.madrid.lite-idswake" = true
-    "com.apple.usernotifications.delegate.com.apple.iChat" = true
-    "com.apple.usernotifications.delegate.com.apple.MobileSMS" = true
-  }
-}
+com.apple.UIKit.MacHelper [Lifecycle] Enqueueing BSAction: <UISOpenURLAction> (for AppleEvent: GURL/GURL)
+com.apple.UIKit.MacHelper [Lifecycle] UISceneActivationConditions told us to send action to scene: <UISOpenURLAction> -> FUScene|com.apple.MobileSMS(767)|...
+com.apple.FrontBoard [SceneClient] [(FBSceneManager):FUScene|...] Sending action(s) in update: UISOpenURLAction
+com.apple.Messages [CKSceneDelegate] <private>: -[CKSceneDelegate scene:openURLContexts:] <private>
 ```
 
-`imagent` is the centralized state holder for everything iMessage. The Messages.app UI is just a client of imagent. IMCore (client-side library) talks to imagent over **mach service `com.apple.imagent`** via `IMDaemonController`.
+So `aevt/GURL` → `UISOpenURLAction` → routed to existing scene → `CKSceneDelegate scene:openURLContexts:`. For an `x-apple-appintents://` URL via the same path, the AppleEvent reply was `errn: -1708` (errAEEventNotHandled) — Messages.app's GURL handler explicitly rejects this scheme.
 
-`Messages.app` itself runs as PID 767 in this session and registers **no machservice of its own** — verified via `launchctl print pid/767` (the `services = {}` block is empty). Its only inbound RPC surface is therefore Apple Events / URL handling / NSUserActivity (which all go through LaunchServices → AppKit / UIKit).
+## The selectors that misled us
 
-## The selectors
+The string `_automation_markAsRead:messageGUID:forChatGUID:fromMe:` from
+the Messages.app binary, and `_automation_markMessagesAsRead:messageGUID:forChatGUID:fromMe:queryID:`
+plus the `IMDaemonAutomationRequestHandler` family in imagent's strings — these
+are NOT UI-driving APIs. They are:
 
-The string `_automation_markAsRead:messageGUID:forChatGUID:fromMe:` is in the Messages.app binary. The string `_automation_markAsReadQuery:finishedWithResult:` is on `IMChatRegistry` (verified via `class_copyMethodList`). The `Automation` family in imagent is much richer:
+- **Daemon-side** automation hooks (in imagent's address space) for marking-as-read
+  / sending / receiving via the daemon, mostly used by the test harness
+  `screenshotTest.xctest` (`/AppleInternal/XCTests/com.apple.mobilesms/screenshotTest.xctest`
+  — internal Apple XCTest target).
+- **Client-side** mirror on `IMChatRegistry` (instance method `_automation_markAsReadQuery:finishedWithResult:`) which is the callback for the daemon's reply, not a navigation primitive.
 
+Neither family takes a "show this message" action. The prior agent was looking
+at the wrong selectors entirely.
+
+## What ACTUALLY exists for GUID-targeted reveal
+
+### `ChatKit.OpenMessageIntent`
+
+Path:
 ```
-imagent strings → _automation_markAsRead:messageGUID:forChatGUID:fromMe:queryID:
-                  _automation_markMessagesAsRead:messageGUID:forChatGUID:fromMe:queryID:
-                  _automation_receiveDictionary:options:fromID:
-                  _automation_receiveDictionary:options:fromHandle:
-                  _automation_sendDictionary:options:toHandles:
-                  _automation_messageDeliveryControllerDidFlushCacheForRemoteURI:fromURI:guid:
+/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/Resources/Metadata.appintents/extract.actionsdata
 ```
-
-And matching classes in the daemon:
-```
-IMDaemonAutomationRequestHandler
-AutomationRequestHandler
-"AUTOMATION Request from %@ to mark as read: %@ messageGUID %@ chatGUID: %@"
-```
-
-**Re-interpretation of these selectors** — and this is the key insight that changes the prior agent's conclusion:
-
-- `_automation_markAsRead:…` does **not** "navigate to" or "show" a message. It marks-as-read (write side-effect on chat state). The name `automation` in IMCore refers to **MobileMe/IMS daemon automation hooks for unit tests + state-sync** — not "Messages.app's UI automation hooks". The dictionary key is `IMAutomationRequestHandler` in imagent.
-- These selectors live on **`IMChatRegistry`**, which is the *client-side* library class. They are not on Messages.app's window/scene; they're on a class that runs in *any process that links IMCore* — including our own.
-- That means the `_automation_*` family wouldn't help us "jump to a message in Messages.app's UI" even if we could call them, because they only operate on chat-state (mark read), not on UI navigation.
-
-**So the original hypothesis was based on a misread.** The `_automation_` selector isn't a UI-driver; it's a state-mutator on the central daemon. It doesn't scroll Messages.app or focus a row.
-
-## Hypotheses to test (anyway, because something must drive UI)
-
-There has to be *some* path that drives Messages.app's UI from outside — at minimum, when you click a notification, Messages.app jumps to the correct chat. Let's identify what that path is.
-
-Candidates:
-
-1. **NSUserActivity continuation.** Messages.app declares:
-   - `NSUserActivityTypes = ["com.apple.Messages", "com.apple.Messages.StateRestoration"]`
-   - `CoreSpotlightContinuation = 1`
-   - The binary contains `application:continueUserActivity:restorationHandler:`.
-
-   This is the most promising lead: hand Messages.app an `NSUserActivity` with `activityType = "com.apple.Messages"` and some `userInfo` payload that names a chat/message, via `NSWorkspace.open` or `NSWorkspace.openURLs(_:withApplicationAt:configuration:)`. If imagent indexes chat content into CoreSpotlight, then **tapping a Spotlight result** is exactly this — we should be able to mimic it.
-
-2. **Apple Event with `'shud'` descriptor.** The Messages.app binary handles AEs via `_handleAppleEvent:withReplyEvent:` and `processAppleEventDictionary:`. Error strings:
-   - `"No 'shud' descriptor on apple event: %@"` — there IS a `'shud'` (Should-handle?) descriptor expected on certain events.
-   - `"_handleAppleEvent: expected scene delegate of type 'CKMessagesSceneDelegate'. Instead got scene '%@' with delegate '%@'. Dropping Apple Event."` — the event is dispatched to a UIScene delegate, which IS the chat UI controller.
-
-   If we can construct an `NSAppleEventDescriptor` with the right class/ID and a `'shud'` parameter, we drive the same UI path notifications use.
-
-3. **Distributed notification with a payload.** imagent posts a fleet of these. Messages.app may listen on a name like `com.apple.imessage.openChat` with `userInfo`. Worth grepping for `addObserver:.*Notification` names in the binary.
-
-4. **dlopen IMCore (native macOS copy) and instantiate IMChatRegistry.** Already verified: `dlopen` works, classes load, but they run in **our process** — calling `existingChatWithGUID:` gives us an `IMChat` object in our own address space, which is great for *reading* iMessage state and *sending messages on behalf of the user*, but does NOT drive Messages.app's UI.
-
-5. **Parameterized AX attributes.** `AXUIElementCopyParameterizedAttributeNames` on a Messages.app element might expose `AXShowMessage` or similar that takes a GUID. Worth a try.
-
-6. **URL scheme variants we haven't tried.** The `sms://` family was exhaustively probed in `docs/messages-deep-link.md`. But the Messages.app binary contains URL handling beyond `sms://`: `application:openURL:options:` is called, with options. Maybe specific `messages://` URLs with `targetContentIdentifier` or similar work.
-
-## Hypothesis 4 verification (done — dlopen IMCore works)
 
 ```bash
-# Native macOS IMCore loads fine; iOSSupport copies refuse.
-dlopen("/System/Library/PrivateFrameworks/IMCore.framework/IMCore", RTLD_NOW) → OK
-dlopen("/System/iOSSupport/.../IMCore", RTLD_NOW) → "wrong platform to load into process"
+jq '.actions.OpenMessageIntent' .../extract.actionsdata
 ```
 
-Classes recovered via `objc_copyClassList`:
-- `IMChatRegistry`, `IMChat`, `IMChatHistoryController`, `IMChatItem`
-- `IMMessage`, `IMMessageItem`, `IMMessageChatItem`, `IMMessageDescriptor`, `IMMessagePartGUID`, `IMMessageHistoryMessage`
-- `IMHandle`, `IMHandleRegistrar`
-- `IMDaemonController`, `IMDaemonConnection`, `IMDaemonListener`, `IMDaemonQuery`, `IMDaemonQueryController`
-- `IMAutomation`, `IMAutomationMessageSend`, `IMAutomationBatchMessageOperations`, `IMAutomationGroupChat`
-- `IMCoreAutomationHook`, `IMCoreAutomationNotifications`
+Key fields:
+- `fullyQualifiedTypeName`: `ChatKit.OpenMessageIntent`
+- `mangledTypeName`: `7ChatKit17OpenMessageIntentV`
+- `actionConfiguration.actionSummary.summaryString.formatString`: `"Reveal ${target}"`
+- `parameters`: one — `target` of type `MessageEntity`, required, non-optional
+- `openAppWhenRun: true` (launches Messages.app)
+- `isDiscoverable: false` (hidden from Shortcuts UI)
+- `systemProtocols`: `["com.apple.link.systemProtocol.OpenEntity", "com.apple.link.systemProtocol.URLRepresentable"]`
+- `effectiveBundleIdentifiers`: `[]` (no host bundle restriction)
 
-Confirmed selectors that are interesting:
-- `IMChatRegistry sharedInstance` (class method)
-- `IMChatRegistry existingChatWithGUID:` (instance method, takes chat.guid string)
-- `IMChatRegistry _cachedChatWithGUID:` (probably for already-loaded chats)
-- `IMChatRegistry _cachedChatsWithMessageGUID:` (resolve message GUID → its chat[s])
-- `IMChatRegistry _chat_loadPagedHistory:numberOfMessagesBefore:numberOfMessagesAfter:messageGUID:threadIdentifier:queryID:synchronous:completion:` — **history page centered on a messageGUID**
-- `IMChatRegistry _clearExistingTypingIndicatorsWithMessageGUID:excludingChatWithIdentifier:` — operates on a messageGUID
-- `IMChat` instances are returned by these calls
-- `IMDaemonController sharedInstance` and `sendQueryWithReply:query:`
+`MessageEntity` has fields `GUID`, `transferGUID`, `messageType`, `isRead`,
+`attributes`, `body`, `subject`, `author` (`MessagePerson`), `date`,
+`conversation` (`ConversationEntity`), `service`, `attachments`,
+`customAttachments`, `locations`, `links`, `messageEffect`, `reaction`,
+`referencedMessage`, `notificationIdentifier`. It conforms to
+`com.apple.appintents.entity.Indexed` and `com.apple.appintents.entity.URLRepresentable`.
 
-These are all *client-side* and produce read-only data / mutate daemon state. **They do not drive Messages.app's UI.** We don't pursue further as a "jump-to-GUID" mechanism — but they're useful for cross-checking what we learn from chat.db (we could resolve a message GUID to its full IMMessage object via the daemon, then use the rich metadata for a smarter AX match).
+`ConversationEntity` is similar with `conversationGUID`, `recipients`, etc.
 
-## Hypothesis 1: NSUserActivity continuation (TESTING)
+There's also `ChatKit.OpenConversationIntent` (target: `ConversationEntity`),
+`SendMessageReactionIntent`, `MarkConversationAsUnreadIntent`,
+`MuteConversationIntent`, `DeleteMessageIntent`, etc. — all currently
+unreachable for the same reasons as below.
 
-[results to follow]
+### The URL representation
 
-## Hypothesis 2: Apple Event with custom payload (TESTING)
+User confirmed empirically and Apple convention matches:
+```
+x-apple-appintents://com.apple.MobileSMS/MessageEntity/<messageGUID>
+```
 
-[results to follow]
+Form: `x-apple-appintents://<bundle-id>/<EntityTypeName>/<entity-id>`.
 
-## Hypothesis 3: Distributed notification (TESTING)
+**No LaunchServices handler claims the `x-apple-appintents://` scheme.** `lsregister -dump` has zero matches. `NSWorkspace.shared.open` on this URL pops the macOS "There is no application set to open the URL …" dialog with a "Search the App Store" / "Choose Application" prompt.
 
-[results to follow]
+## Things we tried — chronologically, with results
 
-## Hypothesis 5: Parameterized AX attributes (TESTING)
+### 1. NSWorkspace.open with x-apple-appintents URL → fails (no handler)
+Returns false; macOS shows the "no app set" dialog. Already known.
 
-[results to follow]
+### 2. NSAppleEventDescriptor kAEGetURL → -1708
+```swift
+let event = NSAppleEventDescriptor.appleEvent(withEventClass: 0x61657674 /* 'aevt' */, eventID: 0x4755524C /* 'GURL' */, …)
+event.setParam(NSAppleEventDescriptor(string: entityURL.absoluteString), forKeyword: keyDirectObject)
+let reply = try event.sendEvent(…)
+```
+Reply: `<NSAppleEventDescriptor: 'aevt'\'ansr'{ 'errn':-1708 }>` — `errAEEventNotHandled`. Messages.app receives the AppleEvent but its `_handleAppleEvent:withReplyEvent:` (route in binary at `0x100022060`) dispatches the GURL action to `CKSceneDelegate scene:openURLContexts:` which ignores `x-apple-appintents://`.
 
-## Hypothesis 6: undocumented URL scheme params (TESTING)
+(Bonus: the `'shud'` descriptor we found in error strings (`"No 'shud' descriptor on apple event: %@"`) is for **`SHKMessagesLaunchEventContext`** — ShareKit's "Share via Messages" event, NOT a navigation event. Verified by inspecting `SHKMessagesLaunchEventContext` (in `ShareKit.framework`) — its properties are `subject`, `recipients`, `text`, `URLs`, `fileURLs`, etc. Dead end.)
 
-[results to follow]
+### 3. NSUserActivity with various activityType / userInfo
+Tried:
+- `activityType = "com.apple.Messages"` with `userInfo[__kIMChatRegistryContinuityURLKey] = <URL>` and `userInfo[__kIMChatRegistryUserActivityLastMessageKey] = <GUID>` (the actual key names IMCore exports), then `activity.becomeCurrent()` + `app.activate()`. No navigation.
+- `activityType = "com.apple.corespotlight.searchableitem"` with `userInfo[kCSSearchableItemActivityIdentifier] = <URL>`. No navigation.
 
-## Conclusion
+`NSUserActivity.becomeCurrent()` makes the activity the *originating* app's current activity — for the activity to actually be delivered to another app, Continuity (Handoff over Bluetooth) or a Spotlight tap mediates it. We can't fake either.
 
-[to be filled in]
+The relevant ChatKit-side handler — `+[CKUserActivityHandler messagesScene:continueUserActivity:withNavigationProvider:chatController:completion:]` — IS the right entry point. It reads `userActivity.userInfo` for `__kIMChatRegistryUserActivityLastMessageKey` and `__kIMChatRegistryContinuityURLKey` and navigates. But we have no way to push our activity into Messages.app's `scene:continueUserActivity:` from a third-party process.
 
+### 4. LSOpenURLsWithRole, openURLs(withApplicationAt:)
+Returns success (`com.apple.MobileSMS` becomes frontmost), but Messages.app gets the URL via the same `scene:openURLContexts:` route and ignores `x-apple-appintents://`. Same as Strategy 1.
+
+### 5. dlopen IMCore (native macOS copy) — works, doesn't drive UI
+
+The native-macOS copy `/System/Library/PrivateFrameworks/IMCore.framework/IMCore` dlopens cleanly. Classes recovered via `objc_copyClassList`:
+- `IMChatRegistry` (with selectors `existingChatWithGUID:`, `_cachedChatsWithMessageGUID:`, `_chat_loadPagedHistory:numberOfMessagesBefore:numberOfMessagesAfter:messageGUID:threadIdentifier:queryID:synchronous:completion:` — a paged-history-around-a-message API on the daemon side)
+- `IMChat`, `IMMessage`, `IMMessageItem`, `IMHandle`
+- `IMDaemonController` (`sharedInstance`, `sendQueryWithReply:query:`)
+- `IMAutomation`, `IMAutomationMessageSend`, `IMAutomationGroupChat`, `IMAutomationBatchMessageOperations`, `IMCoreAutomationHook`, `IMCoreAutomationNotifications`
+
+These run in **our** address space. They talk to imagent over XPC for chat state, but **they do not drive Messages.app's UI**. Calling `IMChatRegistry existingChatWithGUID:` in our process gives us an `IMChat` we can inspect (sender, participants, message history, etc.) — useful for fact-checking our chat.db decoding, but not for reveal.
+
+### 6. Distributed/Darwin notifications
+
+Posted plausible names (`CKEmphasizeBalloonAtIndexPathNotification`,
+`com.apple.imessage.openChat`, `com.apple.messages.revealMessage`, etc.) with
+chat/message GUID payload via `DistributedNotificationCenter.default()` —
+Messages.app didn't react. `CKEmphasizeBalloonAtIndexPathNotification` (a real
+ChatKit symbol) is **intra-process** (regular `NSNotificationCenter`), not
+cross-process.
+
+`IMDPersistenceAgent.xpc` has `_AllowedClients` gated to Apple-signed bundle IDs:
+```
+identifier = com.apple.MobileSMS.spotlight and anchor apple
+identifier = com.apple.imagent and anchor apple
+identifier = com.apple.imdmessageservices.IMDMessageServicesAgent and anchor apple
+```
+We can't connect.
+
+### 7. Parameterized AX attributes
+
+`AXUIElementCopyParameterizedAttributeNames` on every node in Messages.app's AX
+tree returns only `AXReplaceRangeWithText` (for text fields) and the standard
+`AXLineRangeForIndex`, `AXBoundsForRange`, etc. text-marker attributes. **No AX
+parameterized attribute takes a message identifier.** Dead end.
+
+### 8. LNAction + LNApplicationConnection + LNActionExecutor (the SPI route)
+
+This is where it gets interesting. AppIntents has Objective-C bridge classes in
+`/System/Library/Frameworks/AppIntents.framework/AppIntents` that loadable from
+any process:
+
+```
+LNAction           — the action to perform
+LNActionMetadata   — metadata describing an action (from .appintents file)
+LNParameter        — a (name, LNValue) pair
+LNValue            — typed value
+LNEntity           — an entity instance (id + properties)
+LNEntityIdentifier — identifier for an entity (typeName + value)
+LNEntityValueType  — type wrapper for entities
+LNApplicationConnection / LNMacApplicationConnection — XPC connection to a target app
+LNConnectionManager.sharedInstance — connection lifecycle
+LNActionExecutor   — performs an action over a connection
+LNActionExecutorOptions — execution options (source, kind, interactionMode, etc.)
+```
+
+We built the action correctly (see `scripts/probes/probe-ln-perform.m`):
+
+```objc
+id entityID  = [[LNEntityIdentifier alloc] initWithValue:messageGUID typeName:@"MessageEntity"];
+id entity    = [[LNEntity alloc] initWithIdentifier:entityID];
+id entityType= [[LNEntityValueType alloc] initWithTypeName:@"MessageEntity"];
+id lnValue   = [[LNValue alloc] initWithValue:entity valueType:entityType];
+id parameter = [[LNParameter alloc] initWithIdentifier:@"target" value:lnValue];
+id action    = [[LNAction alloc] initWithIdentifier:@"OpenMessageIntent"
+                                  mangledTypeName:@"7ChatKit17OpenMessageIntentV"
+                                   openAppWhenRun:YES
+                                       parameters:@[parameter]];
+// action.description prints:
+//   <LNAction: 0x…, identifier: OpenMessageIntent, mangledTypeName: 7ChatKit17OpenMessageIntentV,
+//    openAppWhenRun: YES, …, parameters: ( "<LNParameter: …, identifier: target,
+//    value: (Entity<MessageEntity>) <redacted>>" )>
+```
+
+The connection works (we get a real `LNConnectionProxy` wrapping
+`LNMacApplicationConnection`):
+```objc
+id conn = [[LNApplicationConnection alloc] initWithBundleIdentifier:@"com.apple.MobileSMS"];
+// → <LNConnectionProxy: 0x…, wrapping: <LNMacApplicationConnection: 0x…>>
+```
+
+The executor builds fine and `perform` runs without throwing:
+```objc
+id execOpts = [[LNActionExecutorOptions alloc] init];
+id executor = [conn executorForAction:action options:execOpts delegate:nil];
+[executor perform];
+// executor.state → 100 after a few seconds (terminal state; no error logged)
+```
+
+But Messages.app's UI doesn't change. **No log entries from LinkServices or Messages
+were generated during the perform**, suggesting the request never reaches Messages.app's process.
+
+The reason is in the AppIntents strings:
+```
+"Access denied: Bundle identifier '%s' is not authorized. The calling process must have
+ either the 'com.apple.private.appintents.exception.allow-foreign-bundle-identifiers'
+ entitlement set to true or the 'com.apple.private.appintents.allowed-bundle-identifiers'
+ entitlement containing this bundle identifier."
+```
+
+And the mach service pattern AppIntents uses is `com.apple.private.appintents.delegate.%@`. Listing `launchctl print gui/$(id -u)` shows entries like:
+```
+com.apple.private.appintents.delegate.com.apple.homed
+com.apple.private.appintents.delegate.com.apple.intelligenceplatformd
+com.apple.private.appintents.delegate.com.apple.appstorecomponentsd
+```
+but **no** `com.apple.private.appintents.delegate.com.apple.MobileSMS`. Messages.app doesn't publish this service to anonymous clients. The earlier exception we hit (`'Invalid parameter not satisfying: bundleIdentifier' in LNConnectionPolicy shouldHandleInProcessWithMangledTypeName:bundleIdentifier:`) confirms the system is trying to check our entitlements and rejecting us.
+
+In short: the LNAction path **is structurally correct**, but the XPC mediator
+requires an entitlement only Apple bundles ship with. A non-Apple notarized app
+can't talk to Messages.app's AppIntents extension.
+
+### 9. CSSearchableItemContinuation
+
+If we add a `CSSearchableItem` to our own CoreSpotlight index with
+`uniqueIdentifier = <our x-apple-appintents URL>` and the user **taps the result
+in macOS Spotlight**, Spotlight delivers an `NSUserActivity` of type
+`CSSearchableItemActionType` to **us** with `userInfo[CSSearchableItemActivityIdentifier]
+= <url>`. That's the documented Spotlight reverse path — but it's gated on a
+user click in Spotlight, and the resulting activity is delivered to the
+*indexing app* (us), not to Messages.app. We can't programmatically synthesize
+the user click. Dead end.
+
+## Why the current AX-scroll fallback breaks for old messages
+
+User report (`2026-05-22`): they double-clicked a result for an older message in
+their chat with "Beck" and Messages.app opened the chat but did NOT scroll to
+the target and did NOT highlight anything.
+
+`CKSceneDelegate` and `CKTranscriptCollectionView` use lazy loading — older
+messages are not in the loaded bubble set when the chat opens. Specifically:
+- AX walk over `TranscriptCollectionView` only finds bubbles currently rendered (~14-17 at a time).
+- ⌘F/Find-in-Conversation also searches the loaded set (or maybe a slightly larger window — but bounded).
+- We don't have a "scroll up by page until found" loop bounded by anything sensible.
+
+`ChatKit.OpenMessageIntent` would fix this because Messages.app would request the message from imagent (which has paged history) and jump to it. That's exactly the gap we tried to close here and couldn't.
+
+## Possible future paths (none implemented)
+
+1. **Ship a privileged helper extension** that has the
+   `com.apple.private.appintents.exception.allow-foreign-bundle-identifiers`
+   entitlement. Apple doesn't grant this to third-party developers — we'd need
+   special licensing.
+
+2. **Implement an iterative `AXScrollUpByPage` loop** on the
+   `TranscriptCollectionView` that continues until the target bubble's
+   `AXDescription` matches our needles. Bounded by a sane time/page limit. This
+   is the most realistic next step — it doesn't reach for private IPC, just
+   leverages AX more aggressively. Estimate: ~50 lines of Swift in
+   `MessagesGUIDReveal.swift`. Would solve the lazy-load problem for text
+   messages. Attachments would still fail (no body to refine the match), but
+   `(sender, time)` matching usually disambiguates.
+
+3. **Spawn a sandboxed Catalyst-mode helper app** that links iOSSupport's
+   ChatKit directly (since it's a Catalyst environment). Then `dlopen` from
+   that helper can load ChatKit, instantiate `ChatKit.OpenMessageIntent`, and
+   perform it locally. This is in a gray zone — Catalyst-mode helpers exist on
+   macOS 26, but Apple's signing rules around iOSSupport private framework
+   linking are tight.
+
+4. **Patch the keystroke flow** to use ⌘F multiple times with different
+   keywords until found. Naive but might work — ⌘F + the timestamp string +
+   ↵ might land far back enough.
+
+5. **Custom URL scheme via NSExtension?** Register our app as the handler for
+   `x-apple-appintents://` (it's currently unhandled). If we then call
+   `NSWorkspace.open` on the URL, our app would be invoked with the URL — at
+   which point we have nothing extra to do, since the issue was getting
+   Messages.app to receive it. Doesn't help.
+
+## Probes (scripts/probes/)
+
+All probes are safe and idempotent — they don't write to chat.db, don't modify
+Messages.app, don't require entitlements beyond Accessibility (already granted
+to our app for the AX-walk path).
+
+- `probe-user-activity.swift` — battery of URL variants + NSUserActivity attempts via NSWorkspace.
+- `probe-distributed-notif.swift` — try ChatKit notification names with chat/message payload.
+- `probe-chatkit-intent.swift` — early reconnaissance for ChatKit AppIntents.
+- `probe-chatkit-url-routing.swift` — NSUserActivity, AppleEvent kAEGetURL, NSWorkspace variants for `x-apple-appintents://`.
+- `probe-ln-perform.swift` / `probe-ln-perform.m` — build LNAction and inspect via objc runtime.
+- `probe-lnconn-perform.m` — full LNAction + LNApplicationConnection + LNActionExecutor pipeline. Builds cleanly, performs without error, but no Messages.app navigation.
+
+## What we surface for the parent agent
+
+- **No production-code changes shipped.** `Sources/Reveal/MessagesGUIDReveal.swift` is unchanged.
+- **Recommended next iteration**: implement the AX iterative-paging loop (option 2 above) to fix the lazy-load problem without needing privileged entitlements. Lower-risk, ships in a single PR.
+- **Long-term**: the LNAction code-path is laid out in `probe-lnconn-perform.m` and would activate if we ever ship as an Apple-signed extension or get the requisite private entitlement.
