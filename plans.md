@@ -367,6 +367,15 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — features-agent (dashboard)
+- New `Sources/Dashboard/` module: `DashboardView`, `DashboardViewModel`, `DashboardLoader`, `DashboardStats`, plus components (`StatPanel`, `TopList`, `WindowSelector`, `FrequencyChart`). New `Window("Dashboard", id: WindowID.dashboard)` scene in `BetterMessagesApp.swift`; new "Dashboard…" menu bar item.
+- Layout: header strip with 4 stat tiles (total / sent / received / conversations + date span) → 30d/12m/All segmented selector → Swift-Charts frequency chart (sent + received) → side-by-side Top People (12, by total exchanged, 1:1 only) and Top Groups (12, by your sent count). Uses existing `GlassCard`, design tokens, and `.containerBackground(.thinMaterial, for: .window)`.
+- 11 new `DashboardLoaderTests`: overview totals, top-contact ranking + ordering + merging, top-groups (HAVING sent>0), time-series bucketing + additivity, date-range helper, tapback exclusion. All pass.
+- **Real-data smoke against user's chat.db**: 524,298 messages, 1,486 chats; top contact 31,284 total exchanged; top group "Hao did this chat start" 36,521 messages. Time series produced 31 daily buckets in last 30 days. Numbers ordered correctly, span the full date window. SQL is sub-second on these sizes.
+- **Error panel**: if FDA isn't granted (common for fresh debug builds — new bundle identity ≠ previously-granted bundle), the dashboard renders a friendly "Can't open Messages" panel with selectable error text + a deep-link button to System Settings → Privacy & Security → Full Disk Access. Same pattern as the panel's existing access-denied state.
+- **Known caveat**: debug rebuilds get a fresh bundle identity, so FDA grants don't automatically carry over from previous builds. Documented in the error panel UX. Properly signed Release builds wouldn't have this churn.
+- ✅ build, ✅ tests, relaunched.
+
 ### 2026-05-22 — features-agent (length-prefix bug — broad fix)
 - **Empirical baseline on user's real chat.db** (5000 random rows with attributedBody): **15.5% of decoded bodies had a leading-char artifact** under the broad rule. The narrow (digits-only) fix I shipped earlier caught just 28% of those cases. Most leakage was letters (265 rows) and other printable ASCII / punctuation (283 rows). See `docs/decoder-fix-empirical.md` for the full histogram + false-positive analysis.
 - **Fix in `Sources/Data/AttributedBodyDecoder.stripLengthPrefix`**: broadened from digits (0x30–0x39) to all printable ASCII (0x20–0x7E). Same algorithm — strip iff leading scalar's byte value equals the rest's UTF-8 byte length — just a wider input range. False-positive collision rate ≤1/1000 (a message that legitimately starts with character `c` AND is exactly `c.byteValue + 1` bytes total). Acceptable trade.
