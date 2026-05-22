@@ -28,6 +28,21 @@ struct BetterMessagesApp: App {
         .defaultSize(width: 1180, height: 760)
         .windowResizability(.contentMinSize)
 
+        // Dashboard — analytics surface with frequency chart + top lists.
+        // Same window-level glass treatment as the browser. Generous default
+        // size so the chart and two top-lists fit side-by-side without
+        // crowding; a smaller min size keeps it usable when the user shrinks
+        // the window down.
+        Window("Dashboard", id: WindowID.dashboard) {
+            DashboardView()
+                .frame(minWidth: 900, minHeight: 620)
+                .containerBackground(.thinMaterial, for: .window)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .defaultSize(width: 1200, height: 800)
+        .windowResizability(.contentMinSize)
+
         // Settings — currently just hotkey rebinding. SettingsLink in the menu
         // bar pops this up.
         Settings {
@@ -40,6 +55,7 @@ struct BetterMessagesApp: App {
 /// duplicate magic strings.
 enum WindowID {
     static let browser = "browser"
+    static let dashboard = "dashboard"
 }
 
 // MARK: - Menu bar content
@@ -60,6 +76,11 @@ private struct MenuBarContent: View {
 
         Button("Open Browser") {
             openWindow(id: WindowID.browser)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        Button("Dashboard…") {
+            openWindow(id: WindowID.dashboard)
             NSApp.activate(ignoringOtherApps: true)
         }
 

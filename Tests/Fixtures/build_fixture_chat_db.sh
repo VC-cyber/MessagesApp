@@ -70,6 +70,24 @@ NS_DATE_2=740145660000000000
 # A tapback message — also nanoseconds, modern.
 NS_DATE_TAPBACK=740145720000000000
 
+# Bursts of tapbacks for the reactions tests — staggered by 30s each so the
+# ascending-by-date load order is deterministic.
+NS_DATE_TAPBACK_2=740145750000000000
+NS_DATE_TAPBACK_3=740145780000000000
+NS_DATE_TAPBACK_4=740145810000000000
+NS_DATE_TAPBACK_5=740145840000000000
+NS_DATE_TAPBACK_6=740145870000000000
+NS_DATE_TAPBACK_7=740145900000000000
+NS_DATE_TAPBACK_8=740145930000000000
+NS_DATE_TAPBACK_9=740145960000000000
+NS_DATE_TAPBACK_10=740145990000000000
+NS_DATE_TAPBACK_11=740146020000000000
+
+# A "reactable" message (row 5) with a known GUID we can target from
+# tapback rows. This is the message we'll surface in the reaction-loader
+# test as having multiple reactions.
+NS_DATE_REACTABLE=740146050000000000
+
 sqlite3 "$DB" <<SQL
 PRAGMA foreign_keys = OFF;
 
@@ -116,6 +134,7 @@ CREATE TABLE message (
     account TEXT,
     associated_message_guid TEXT,
     associated_message_type INTEGER DEFAULT 0,  -- 0 = real msg, nonzero = tapback
+    associated_message_emoji TEXT,    -- non-NULL for custom-emoji reactions (type=2006)
     attributedBody BLOB
 );
 
@@ -191,11 +210,104 @@ VALUES
   (4, 'msg-0004-tap', NULL, 1, 0, $NS_DATE_TAPBACK, 'iMessage',
    'bp:msg-0003', 2000, NULL);
 
+-- 5) Highly-reacted target message: a regular message in the 1:1 chat
+--    that we'll attach 6 reactions to (2 loves, 1 like, 1 laugh,
+--    1 custom-emoji, 1 sticker). Used by ReactionLoaderTests.
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_type, attributedBody)
+VALUES
+  (5, 'msg-0005-reactable', 'check this out, big news', NULL, 1, $NS_DATE_REACTABLE,
+   'iMessage', 0, NULL);
+
+-- ----- reaction rows (associated_message_type in 2000-2999) -----
+-- All target msg-0005-reactable. Mix of senders and types so the tests can
+-- assert grouping, kind decoding, the per-sender "latest wins" rule, and
+-- the prefix-stripping behavior on associated_message_guid.
+
+-- 6) Love from contact handle 1 (phone). Prefix: p:0/
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (6, 'rxn-0001', NULL, 1, 0, $NS_DATE_TAPBACK_2, 'iMessage',
+   'p:0/msg-0005-reactable', 2000, NULL);
+
+-- 7) Love from contact handle 3 (phone). Prefix: p:0/
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (7, 'rxn-0002', NULL, 3, 0, $NS_DATE_TAPBACK_3, 'iMessage',
+   'p:0/msg-0005-reactable', 2000, NULL);
+
+-- 8) Laugh from handle 3. Prefix: bp:  (older format)
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (8, 'rxn-0003', NULL, 3, 0, $NS_DATE_TAPBACK_4, 'iMessage',
+   'bp:msg-0005-reactable', 2003, NULL);
+
+-- 9) Like from "me" (handle_id NULL, is_from_me=1).
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (9, 'rxn-0004', NULL, NULL, 1, $NS_DATE_TAPBACK_5, 'iMessage',
+   'p:0/msg-0005-reactable', 2001, NULL);
+
+-- 10) Custom emoji from handle 1. associated_message_emoji is "🤓".
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, associated_message_emoji,
+   attributedBody)
+VALUES
+  (10, 'rxn-0005', NULL, 1, 0, $NS_DATE_TAPBACK_6, 'iMessage',
+   'p:0/msg-0005-reactable', 2006, '🤓', NULL);
+
+-- 11) Sticker reaction (type 2007). No emoji. From handle 3.
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (11, 'rxn-0006', NULL, 3, 0, $NS_DATE_TAPBACK_7, 'iMessage',
+   'p:0/msg-0005-reactable', 2007, NULL);
+
+-- 12) REMOVED reaction (type 3000). Loader MUST drop this — it's historical.
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (12, 'rxn-0007', NULL, 1, 0, $NS_DATE_TAPBACK_8, 'iMessage',
+   'p:0/msg-0005-reactable', 3000, NULL);
+
+-- 13) handle 1 switches from custom-emoji to dislike (later date wins).
+--     "Latest wins" per-sender rule means rxn-0005 should DROP and this
+--     dislike is the active reaction from handle 1.
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type, attributedBody)
+VALUES
+  (13, 'rxn-0008', NULL, 1, 0, $NS_DATE_TAPBACK_9, 'iMessage',
+   'p:0/msg-0005-reactable', 2002, NULL);
+
 -- ----- chat_message_join -----
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 1, $NS_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 2, $SEC_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (2, 3, $NS_DATE_2);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (2, 4, $NS_DATE_TAPBACK);
+-- The reactable message lives in chat 1 (1:1 with the multi-handle contact).
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 5, $NS_DATE_REACTABLE);
+-- Reaction rows are joined to the same chat so chat-scoped tests still work.
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 6, $NS_DATE_TAPBACK_2);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 7, $NS_DATE_TAPBACK_3);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 8, $NS_DATE_TAPBACK_4);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 9, $NS_DATE_TAPBACK_5);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 10, $NS_DATE_TAPBACK_6);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 11, $NS_DATE_TAPBACK_7);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 12, $NS_DATE_TAPBACK_8);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 13, $NS_DATE_TAPBACK_9);
 
 -- ----- indexes (mirror real chat.db enough to keep query plans honest) -----
 CREATE INDEX message_idx_date ON message(date);
