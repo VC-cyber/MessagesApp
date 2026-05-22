@@ -1,0 +1,86 @@
+name: BetterMessages
+options:
+  bundleIdPrefix: com.satyajit
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  xcodeVersion: "26.0"
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: "7.0.0"
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts.git
+    from: "2.2.0"
+
+targets:
+  BetterMessages:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: KeyboardShortcuts
+        product: KeyboardShortcuts
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.satyajit.bettermessages
+        PRODUCT_NAME: BetterMessages
+        INFOPLIST_KEY_CFBundleDisplayName: Better Messages
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Satyajit Amme. All rights reserved."
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        # Menu bar / accessory app — no Dock icon. Hotkey is the primary entry point.
+        INFOPLIST_KEY_LSUIElement: YES
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: Resources/BetterMessages.entitlements
+        ENABLE_PREVIEWS: YES
+        DEAD_CODE_STRIPPING: YES
+        COMBINE_HIDPI_IMAGES: YES
+
+  BetterMessagesTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: BetterMessages
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.satyajit.bettermessages.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  BetterMessages:
+    build:
+      targets:
+        BetterMessages: all
+        BetterMessagesTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - BetterMessagesTests
+    archive:
+      config: Release

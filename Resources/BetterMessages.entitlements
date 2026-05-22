@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        App Sandbox is DISABLED.
+
+        Better Messages reads ~/Library/Messages/chat.db, which lives outside any
+        sandbox container. macOS gates access via TCC (Full Disk Access), which
+        the user grants in System Settings → Privacy & Security → Full Disk Access.
+
+        If we ever enable the sandbox, we'd need a security-scoped bookmark to
+        chat.db, which the user would have to re-pick on every macOS update.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>
