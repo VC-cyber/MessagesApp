@@ -260,6 +260,22 @@ public enum MessagesGUIDReveal {
                 // — use the documented string value directly. Empirically
                 // verified action on Messages.app message bubbles (macOS 26.5).
                 _ = AXUIElementPerformAction(bubble, "AXScrollToVisible" as CFString)
+
+                // After `sms://open?…` the OS gives Messages.app focus but
+                // the *first responder* lands on the sidebar's universal
+                // search field by default — so a subsequent ⌘F lands there
+                // instead of inside the chat. Explicitly move keyboard focus
+                // into the transcript before any keystroke synthesis runs.
+                //
+                // We focus the transcript container, not the bubble itself —
+                // bubbles aren't first-responder-eligible, but the transcript
+                // collection view is, and focusing it puts ⌘F in the right
+                // "Find in Conversation" context.
+                _ = AXUIElementSetAttributeValue(
+                    transcript,
+                    "AXFocused" as CFString,
+                    kCFBooleanTrue
+                )
                 return true
             }
         }
