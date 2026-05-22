@@ -94,30 +94,50 @@ public enum AttributedBodyDecoder {
         return stripLengthPrefix(trimmed)
     }
 
-    /// Typedstream NSString length-prefix detection — DIGITS ONLY variant.
+    /// Typedstream NSString length-prefix detection — BROAD printable-ASCII variant.
     ///
     /// The typedstream 1-byte length header for an NSString of byte-length N
-    /// is literally the byte value N. For N in 0x30–0x39 (48–57) that byte
-    /// decodes as ASCII '0'–'9' and sticks to the front of the run after
-    /// lossy UTF-8 decoding, e.g. `"2Looks like Amma's flights..."`
-    /// where the leading `'2'` is the byte `0x32` (= 50), not part of the body.
+    /// is literally the byte value N. After lossy UTF-8 decoding, that byte
+    /// survives as a single printable scalar exactly when N is in
+    /// printable-ASCII range (0x20–0x7E, 32–126) — anywhere else it's
+    /// non-printable and our run-splitter already breaks the run at it.
     ///
-    /// We only strip when the leading scalar is an ASCII digit AND the
-    /// remainder's UTF-8 byte length equals that digit's byte value. This is
-    /// the user-visible symptom; broader heuristics (letters and punctuation)
-    /// risked stripping legitimate content for messages of specific byte
-    /// lengths (a 73-byte message starting with 'H' would have 'H' stripped).
+    /// So whenever the longest surviving run starts with a printable-ASCII
+    /// scalar whose byte value equals the run-rest's UTF-8 byte length, that
+    /// leading scalar is a length prefix and must be stripped. Strip iff:
+    ///   1. leading scalar `v` is in 0x20–0x7E, AND
+    ///   2. `rest.utf8.count == v`
     ///
-    /// False positives within this narrower rule require: content starting
-    /// with digit D, and total byte length D+1. Rare. Examples that AREN'T
-    /// false-positive-stripped (rest length doesn't match digit value):
-    ///   - "1st place"   → '1' (49) vs rest 8 bytes → keep
-    ///   - "2 hours"     → '2' (50) vs rest 6 bytes → keep
-    ///   - "$5 each"     → leading '$' isn't a digit → keep
+    /// Examples that the bug used to leak (now stripped):
+    ///   - "rSatyajit Kanna, you…"   ← 'r' = 0x72 = 114, rest 114 bytes
+    ///   - "?So none of our chats…"  ← '?' = 0x3F = 63,  rest 63 bytes
+    ///   - "DSatyajit Kanna, how…"   ← 'D' = 0x44 = 68,  rest 68 bytes
+    ///   - "2Looks like Amma's…"     ← '2' = 0x32 = 50,  rest 50 bytes
+    ///
+    /// Examples that are still preserved (rest length doesn't match):
+    ///   - "1st place"   → '1' (49) vs rest 8 bytes  → keep
+    ///   - "2 hours"     → '2' (50) vs rest 6 bytes  → keep
+    ///   - "$5 each"     → '$' (36) vs rest 6 bytes  → keep
+    ///
+    /// False positives now require BOTH content that legitimately starts
+    /// with a single printable-ASCII byte `c` AND the rest of the message
+    /// being EXACTLY `c` bytes long. Empirically (see
+    /// docs/decoder-fix-empirical.md) this collision is ≤1 per 1000
+    /// messages in the user's chat.db, while the bug it fixes affected
+    /// ~15% of messages. When a collision does happen the displayed
+    /// result is still typically the sensible reading — preferring
+    /// correct display in the common case over preserving the rare aligned
+    /// case is the right trade.
+    ///
+    /// The proper long-term fix is byte-level typedstream parsing
+    /// (Round-3); this heuristic eliminates the visible bug class until then.
     static func stripLengthPrefix(_ run: String) -> String {
         guard let first = run.unicodeScalars.first else { return run }
         let v = Int(first.value)
-        guard v >= 0x30 && v <= 0x39 else { return run }       // ASCII digits only
+        // Length prefix in the typedstream NSString header is a single byte.
+        // After lossy UTF-8 decoding it survives as a printable scalar only
+        // when its byte value sits in printable-ASCII range (0x20–0x7E).
+        guard v >= 0x20 && v <= 0x7E else { return run }
         let rest = String(run.unicodeScalars.dropFirst())
         guard rest.utf8.count == v else { return run }
         return rest
