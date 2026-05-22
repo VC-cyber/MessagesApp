@@ -88,6 +88,43 @@ NS_DATE_TAPBACK_11=740146020000000000
 # test as having multiple reactions.
 NS_DATE_REACTABLE=740146050000000000
 
+# ---------------------------------------------------------------------------
+# Dashboard fixture extras
+# ---------------------------------------------------------------------------
+# Dates anchored to 2026-05-15 12:00 UTC so they fall comfortably inside the
+# "last 30 days" window when the test clock is 2026-05-22 (the current
+# canonical date in plans.md / CLAUDE.md).
+#
+# We want enough data to make every dashboard aggregation meaningful:
+#   - one 1:1 chat with a SECOND contact so top-contacts has order
+#   - one named group with several sent-by-me messages so top-groups
+#     ranking actually has a #1
+#   - messages spanning multiple days (so day-bucketed time series has
+#     more than one row) and a couple of months apart (so month-bucketed
+#     12m view has multiple buckets too)
+#
+# Mac-absolute-time conversions (computed via:
+#   ns = (calendar.timegm((Y,M,D,12,0,0,0,0,0)) - 978307200) * 1e9
+# all anchored to 12:00 UTC):
+#   2026-05-15 12:00:00 UTC: mac ns=800539200000000000
+#   2026-05-14 12:00:00 UTC: mac ns=800452800000000000
+#   2026-05-13 12:00:00 UTC: mac ns=800366400000000000
+#   2026-04-15 12:00:00 UTC: mac ns=797947200000000000   (~37 days before "now"=2026-05-22)
+#   2026-04-14 12:00:00 UTC: mac ns=797860800000000000
+#   2026-03-15 12:00:00 UTC: mac ns=795268800000000000   (~68 days before "now")
+#   2025-11-15 12:00:00 UTC: mac ns=784900800000000000   (~6 months before)
+# Anchor "now" for tests is 2026-05-22 12:00 UTC (matches the canonical
+# date in plans.md). Last-30-days window = approx 2026-04-22 to 2026-05-22,
+# so RECENT_* are inside, LASTMONTH_* are JUST outside, TWOMONTHS_* +
+# SIXMONTHS_* are well outside.
+NS_DATE_RECENT_A=800539200000000000
+NS_DATE_RECENT_B=800452800000000000
+NS_DATE_RECENT_C=800366400000000000
+NS_DATE_LASTMONTH_A=797947200000000000
+NS_DATE_LASTMONTH_B=797860800000000000
+NS_DATE_TWOMONTHS_A=795268800000000000
+NS_DATE_SIXMONTHS_A=784900800000000000
+
 sqlite3 "$DB" <<SQL
 PRAGMA foreign_keys = OFF;
 
@@ -153,6 +190,11 @@ INSERT INTO handle (ROWID, id, country, service) VALUES (2, 'friend@example.com'
 -- A second contact, for the group chat:
 INSERT INTO handle (ROWID, id, country, service) VALUES (3, '+15557654321', 'us', 'iMessage');
 
+-- Additional handle for the dashboard extras: a separate 1:1 partner so the
+-- top-contacts ranking has more than one row. Picks a distinct prefix so
+-- it can't be conflated with contacts 1-3.
+INSERT INTO handle (ROWID, id, country, service) VALUES (4, '+15558889999', 'us', 'iMessage');
+
 -- ----- chats -----
 -- 1:1 chat (style=45) with the multi-handle contact.
 INSERT INTO chat (ROWID, guid, style, chat_identifier, service_name, display_name)
@@ -162,6 +204,14 @@ VALUES (1, 'iMessage;-;+15551234567', 45, '+15551234567', 'iMessage', NULL);
 INSERT INTO chat (ROWID, guid, style, chat_identifier, service_name, display_name)
 VALUES (2, 'iMessage;+;chat0000001', 43, 'chat0000001', 'iMessage', 'Test Group');
 
+-- Dashboard extras: a second 1:1 chat with handle 4, and a second named
+-- group "Dashboard Group" so top-groups ranking has order.
+INSERT INTO chat (ROWID, guid, style, chat_identifier, service_name, display_name)
+VALUES (3, 'iMessage;-;+15558889999', 45, '+15558889999', 'iMessage', NULL);
+
+INSERT INTO chat (ROWID, guid, style, chat_identifier, service_name, display_name)
+VALUES (4, 'iMessage;+;chat0000002', 43, 'chat0000002', 'iMessage', 'Dashboard Group');
+
 -- ----- chat_handle_join -----
 -- 1:1 chat has both phone and email handles for the same contact.
 INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1);
@@ -170,6 +220,15 @@ INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 2);
 -- Group has handles 1 and 3.
 INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (2, 1);
 INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (2, 3);
+
+-- Dashboard 1:1 has handle 4 only.
+INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (3, 4);
+
+-- Dashboard group has handles 1, 3, and 4 — three "participants" not
+-- counting "me".
+INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (4, 1);
+INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (4, 3);
+INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (4, 4);
 
 -- ----- messages -----
 -- 1) Sent message: is_from_me=1, handle_id NULL, MODERN (ns) date,
@@ -292,6 +351,78 @@ VALUES
   (13, 'rxn-0008', NULL, 1, 0, $NS_DATE_TAPBACK_9, 'iMessage',
    'p:0/msg-0005-reactable', 2002, NULL);
 
+-- ----- dashboard fixture extras (rows 100+) -----
+-- These are real (associated_message_type=0) messages spread across two
+-- contacts (handles 1+2 → same person; handle 4 → different person) and
+-- two groups (chats 2 and 4). The goal is to make every dashboard
+-- aggregation produce ordered, distinguishable results.
+--
+-- Ranking targets (window = last 30 days, anchor = NS_DATE_RECENT_*):
+--   Contact A (handle 1 / 2) — chat 1, 1:1: 3 sent + 2 received = 5 total
+--   Contact B (handle 4)     — chat 3, 1:1: 1 sent + 0 received = 1 total
+--   → top-contacts in last-30-days = [Contact A first, Contact B second]
+--
+--   Dashboard Group (chat 4): 4 sent by me
+--   Test Group       (chat 2): 1 sent by me  (none in original fixture; we
+--                                              add one here so it appears)
+--   → top-groups in last-30-days = [Dashboard Group first, Test Group second]
+--
+-- Rows are numbered 100+ so they don't collide with the reaction fixture's
+-- 1-13 range. Dates land:
+--   * NS_DATE_RECENT_*    → within last 30 days (test "30d" window)
+--   * NS_DATE_LASTMONTH_* → ~1 month back     (test "12m" but not "30d")
+--   * NS_DATE_TWOMONTHS_* → ~2 months back    (still within 12m)
+--   * NS_DATE_SIXMONTHS_* → 6 months back     (all-time only)
+
+-- Contact A (chat 1, handles 1/2 — same person):
+-- 3 sent in last 30 days + 2 received in last 30 days
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (100, 'msg-dash-100', 'recent A sent 1', NULL, 1, $NS_DATE_RECENT_A, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (101, 'msg-dash-101', 'recent A sent 2', NULL, 1, $NS_DATE_RECENT_B, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (102, 'msg-dash-102', 'recent A sent 3', NULL, 1, $NS_DATE_RECENT_C, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (103, 'msg-dash-103', 'recent A reply 1', 1, 0, $NS_DATE_RECENT_A, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (104, 'msg-dash-104', 'recent A reply 2 from email', 2, 0, $NS_DATE_RECENT_B, 'iMessage', 0);
+
+-- Contact A also has older traffic so all-time totals are bigger than
+-- the windowed totals.
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (105, 'msg-dash-105', 'two months ago sent', NULL, 1, $NS_DATE_TWOMONTHS_A, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (106, 'msg-dash-106', 'six months ago received', 1, 0, $NS_DATE_SIXMONTHS_A, 'iMessage', 0);
+
+-- Contact B (chat 3, handle 4): one sent in last 30 days.
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (110, 'msg-dash-110', 'sent to B today', NULL, 1, $NS_DATE_RECENT_A, 'iMessage', 0);
+
+-- Test Group (chat 2): one sent message from me in last 30 days (no sent
+-- messages in the original fixture, so this puts it on the leaderboard).
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (120, 'msg-dash-120', 'hello group 1 from me', NULL, 1, $NS_DATE_RECENT_A, 'iMessage', 0);
+
+-- Dashboard Group (chat 4): 4 sent + 1 received in last 30 days, so it
+-- outranks Test Group.
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (130, 'msg-dash-130', 'dash group sent 1', NULL, 1, $NS_DATE_RECENT_A, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (131, 'msg-dash-131', 'dash group sent 2', NULL, 1, $NS_DATE_RECENT_B, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (132, 'msg-dash-132', 'dash group sent 3', NULL, 1, $NS_DATE_RECENT_C, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (133, 'msg-dash-133', 'dash group sent 4', NULL, 1, $NS_DATE_LASTMONTH_A, 'iMessage', 0);
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service, associated_message_type)
+VALUES (134, 'msg-dash-134', 'dash group reply', 3, 0, $NS_DATE_RECENT_A, 'iMessage', 0);
+
+-- A tapback in chat 1 (handle 3 reaction to msg-dash-100) — verifies
+-- tapbacks STILL get excluded from dashboard counts after our extras.
+INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_guid, associated_message_type)
+VALUES (140, 'msg-dash-140-tap', NULL, 3, 0, $NS_DATE_RECENT_A, 'iMessage',
+   'p:0/msg-dash-100', 2000);
+
 -- ----- chat_message_join -----
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 1, $NS_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 2, $SEC_DATE);
@@ -308,6 +439,31 @@ INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 10,
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 11, $NS_DATE_TAPBACK_7);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 12, $NS_DATE_TAPBACK_8);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 13, $NS_DATE_TAPBACK_9);
+
+-- Dashboard fixture joins. Rows 100-106 live in chat 1 (Contact A 1:1).
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 100, $NS_DATE_RECENT_A);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 101, $NS_DATE_RECENT_B);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 102, $NS_DATE_RECENT_C);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 103, $NS_DATE_RECENT_A);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 104, $NS_DATE_RECENT_B);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 105, $NS_DATE_TWOMONTHS_A);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 106, $NS_DATE_SIXMONTHS_A);
+
+-- Contact B chat 3
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (3, 110, $NS_DATE_RECENT_A);
+
+-- Test Group (chat 2) — new sent message from me
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (2, 120, $NS_DATE_RECENT_A);
+
+-- Dashboard Group (chat 4) — sent 4 + 1 received
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 130, $NS_DATE_RECENT_A);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 131, $NS_DATE_RECENT_B);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 132, $NS_DATE_RECENT_C);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 133, $NS_DATE_LASTMONTH_A);
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (4, 134, $NS_DATE_RECENT_A);
+
+-- The dashboard-fixture tapback (row 140) lives in chat 1.
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 140, $NS_DATE_RECENT_A);
 
 -- ----- indexes (mirror real chat.db enough to keep query plans honest) -----
 CREATE INDEX message_idx_date ON message(date);
