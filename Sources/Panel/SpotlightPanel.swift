@@ -85,10 +85,31 @@ struct SpotlightPanel: View {
     }
 
     /// Reveal the given result in Messages.app and dismiss the panel.
-    /// 1:1 chats jump to the conversation; groups fall back to foregrounding
-    /// Messages (Apple doesn't expose a URL for groups — see `MessagesReveal`).
+    ///
+    /// Routing:
+    /// - **GUID-based path** (`MessagesGUIDReveal`) — preferred. Uses
+    ///   `sms://open?groupid=...` to open 1:1 or group chats, AX-scrolls the
+    ///   bubble into view, then synthesizes ⌘F + ⌘V + ↵ for the highlight.
+    /// - **Legacy fallback** (`MessagesReveal`) — only if the message or chat
+    ///   GUID is missing (shouldn't normally happen post-plumbing).
     private func reveal(_ result: MessageSearch.Result) {
-        _ = MessagesReveal.reveal(result)
+        if let messageGUID = result.message.guid,
+           let chatGUID = result.chatGUID {
+            // GUID path runs async; fire-and-forget so the panel can dismiss
+            // immediately instead of overlaying Messages.app during the scroll.
+            Task { @MainActor in
+                _ = await MessagesGUIDReveal.reveal(
+                    messageGUID: messageGUID,
+                    chatGUID: chatGUID,
+                    body: result.message.body,
+                    senderName: result.senderName,
+                    isFromMe: result.message.isFromMe,
+                    messageDate: result.message.date
+                )
+            }
+        } else {
+            _ = MessagesReveal.reveal(result)
+        }
         dismiss()
     }
 
