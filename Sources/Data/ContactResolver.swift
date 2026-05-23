@@ -53,6 +53,15 @@ public struct ResolvedContacts: Sendable {
         }
         return raw
     }
+
+    /// Avatar bytes for the contact owning the given raw handle. Returns the
+    /// resolved contact's `avatarData` (raw PNG / JPEG) when known and a
+    /// photo exists, otherwise nil — callers fall back to a generated
+    /// initials/monogram. Empty / nil input → nil.
+    public func avatarData(forRawHandle raw: String?) -> Data? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return byHandle[Handle(raw: raw)]?.avatarData
+    }
 }
 
 public enum ContactResolver {
@@ -81,11 +90,25 @@ public enum ContactResolver {
     /// Build the lookup. Silently skips Source DBs that fail to open
     /// (matches Python reference's tolerant behavior — one broken Source
     /// shouldn't kill contact resolution for the rest).
-    public static func resolve(databaseURLs: [URL]? = nil) -> ResolvedContacts {
+    ///
+    /// **Avatar loading** is enabled by default. Each contact's `avatarData`
+    /// is populated with the raw PNG/JPEG bytes from
+    /// `ZABCDRECORD.ZTHUMBNAILIMAGEDATA` (preferred) or `ZIMAGEDATA`. The
+    /// `0x01` (inline) / `0x02` (external `_EXTERNAL_DATA/<UUID>` reference)
+    /// framing is handled by `AvatarStorage.decodeBest`. Pass
+    /// `loadAvatars: false` to skip — useful in low-memory or test contexts.
+    public static func resolve(
+        databaseURLs: [URL]? = nil,
+        loadAvatars: Bool = true
+    ) -> ResolvedContacts {
         let urls = databaseURLs ?? defaultDatabaseURLs()
 
-        // contactsByName accumulates handle sets per display-name.
+        // contactsByName accumulates handle sets per display-name. Avatar data
+        // is kept in a parallel map so it can be merged independently — the
+        // first non-nil avatar for a given display name wins (multiple Sources
+        // may carry photos for the same person).
         var contactsByName: [String: Set<Handle>] = [:]
+        var avatarsByName: [String: Data] = [:]
 
         for dbURL in urls {
             var config = Configuration()
@@ -93,19 +116,58 @@ public enum ContactResolver {
             guard let queue = try? DatabaseQueue(path: dbURL.path, configuration: config) else {
                 continue
             }
-            // SQL mirrors the Python reference — left-join phones AND emails;
-            // we'll get one row per (person, phone, email) cross-product, which
-            // is fine since we deduplicate via Set<Handle>.
-            let rows: [Row] = (try? queue.read { db in
+            // Resolve external-data directory once per Source DB. The blob's
+            // `0x02` reference is a bare UUID — the directory tells us where
+            // to find it.
+            let externalDir = AvatarStorage.externalDataDirectory(forDatabase: dbURL)
+
+            // Avatar columns are on the record itself, but phones/emails are
+            // in side tables that we left-join. The cross product would
+            // duplicate the BLOBs (huge). Two queries instead — one for the
+            // (record, handle) cross product, one for (record, image-blobs)
+            // keyed by Z_PK. Map by Z_PK to glue them together.
+            //
+            // The image query lives behind the `loadAvatars` flag so tests
+            // and low-memory contexts can opt out.
+            let handleRows: [Row] = (try? queue.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT r.ZFIRSTNAME, r.ZLASTNAME, p.ZFULLNUMBER, e.ZADDRESS
+                    SELECT r.Z_PK AS pk, r.ZFIRSTNAME, r.ZLASTNAME,
+                           p.ZFULLNUMBER, e.ZADDRESS
                     FROM ZABCDRECORD r
                     LEFT JOIN ZABCDPHONENUMBER p ON p.ZOWNER = r.Z_PK
                     LEFT JOIN ZABCDEMAILADDRESS e ON e.ZOWNER = r.Z_PK
                 """)
             }) ?? []
 
-            for row in rows {
+            // imageBlobsByPK: Z_PK -> decoded PNG/JPEG bytes (or nil for
+            // records without a usable photo). We don't store nil entries —
+            // the dictionary's missing-key semantics handle that for us.
+            var imageBlobsByPK: [Int64: Data] = [:]
+            if loadAvatars {
+                let imageRows: [Row] = (try? queue.read { db in
+                    try Row.fetchAll(db, sql: """
+                        SELECT Z_PK AS pk, ZTHUMBNAILIMAGEDATA AS thumb, ZIMAGEDATA AS full
+                        FROM ZABCDRECORD
+                        WHERE ZTHUMBNAILIMAGEDATA IS NOT NULL
+                           OR ZIMAGEDATA IS NOT NULL
+                    """)
+                }) ?? []
+                for row in imageRows {
+                    let pk: Int64 = row["pk"]
+                    let thumb: Data? = row["thumb"]
+                    let full: Data? = row["full"]
+                    if let decoded = AvatarStorage.decodeBest(
+                        thumbnailBlob: thumb,
+                        fullBlob: full,
+                        externalDataDirectory: externalDir
+                    ) {
+                        imageBlobsByPK[pk] = decoded
+                    }
+                }
+            }
+
+            for row in handleRows {
+                let pk: Int64? = row["pk"]
                 let first: String? = row["ZFIRSTNAME"]
                 let last: String? = row["ZLASTNAME"]
                 let phone: String? = row["ZFULLNUMBER"]
@@ -129,6 +191,15 @@ public enum ContactResolver {
                         contactsByName[displayName, default: []].insert(h)
                     }
                 }
+
+                // Promote the record's avatar to the per-name map. The
+                // left-joined phone/email cross product means we'll see this
+                // pk multiple times — only assign once (first-non-nil wins).
+                if let pk,
+                   avatarsByName[displayName] == nil,
+                   let bytes = imageBlobsByPK[pk] {
+                    avatarsByName[displayName] = bytes
+                }
             }
         }
 
@@ -136,7 +207,11 @@ public enum ContactResolver {
         var contacts: [Contact] = []
         var byHandle: [Handle: Contact] = [:]
         for (name, handles) in contactsByName {
-            let c = Contact(displayName: name, handles: handles)
+            let c = Contact(
+                displayName: name,
+                handles: handles,
+                avatarData: avatarsByName[name]
+            )
             contacts.append(c)
             for h in handles {
                 // Last-writer wins for collision: if two distinct contacts

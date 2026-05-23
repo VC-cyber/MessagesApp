@@ -22,8 +22,19 @@ public struct Contact: Hashable, Sendable, Identifiable {
     /// All normalized handles known to belong to this contact.
     public let handles: Set<Handle>
 
-    public init(displayName: String, handles: Set<Handle>) {
+    /// The contact's profile photo, decoded from `ZABCDRECORD.ZIMAGEDATA` or
+    /// `ZTHUMBNAILIMAGEDATA`, with AddressBook's `0x01`/`0x02` framing byte
+    /// stripped (and external `_EXTERNAL_DATA/<UUID>` references resolved).
+    /// Always raw PNG / JPEG bytes when non-nil — directly consumable by
+    /// `NSImage(data:)`. Nil when the contact has no photo, has only a
+    /// monogram/memoji, or the bytes failed to decode.
+    ///
+    /// See `docs/contact-avatars.md` for the storage format.
+    public let avatarData: Data?
+
+    public init(displayName: String, handles: Set<Handle>, avatarData: Data? = nil) {
         self.displayName = displayName
         self.handles = handles
+        self.avatarData = avatarData
     }
 }
