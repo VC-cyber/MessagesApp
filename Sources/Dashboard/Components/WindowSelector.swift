@@ -13,37 +13,12 @@ struct WindowSelector: View {
     @Binding var selection: DashboardLoader.Window
 
     var body: some View {
-        GlassEffectContainer(spacing: 6) {
-            HStack(spacing: 4) {
-                ForEach(DashboardLoader.Window.allCases) { window in
-                    Button {
-                        withAnimation(.bmGlassMorph) {
-                            selection = window
-                        }
-                    } label: {
-                        Text(window.label)
-                            .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, Space.md)
-                            .padding(.vertical, 6)
-                            .foregroundStyle(selection == window ? Color.accentColor : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .background {
-                        if selection == window {
-                            RoundedRectangle(cornerRadius: Radius.medium, style: .continuous)
-                                .glassEffect(
-                                    .regular.tint(Color.accentColor.opacity(0.22)),
-                                    in: RoundedRectangle(cornerRadius: Radius.medium, style: .continuous)
-                                )
-                        }
-                    }
-                    .contentShape(RoundedRectangle(cornerRadius: Radius.medium))
-                    .accessibilityLabel("Show \(window.label) window")
-                    .accessibilityAddTraits(selection == window ? .isSelected : [])
-                }
+        HStack(spacing: 4) {
+            ForEach(DashboardLoader.Window.allCases) { window in
+                pill(for: window)
             }
-            .padding(3)
         }
+        .padding(3)
         .background(
             RoundedRectangle(cornerRadius: Radius.large, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
@@ -52,6 +27,43 @@ struct WindowSelector: View {
             RoundedRectangle(cornerRadius: Radius.large, style: .continuous)
                 .strokeBorder(Color.hairline, lineWidth: 0.5)
         )
+    }
+
+    /// One pill in the segmented row.
+    ///
+    /// **Z-order note**: `.glassEffect(_:in:)` is applied to the BUTTON
+    /// itself, not to a background `Shape`. When you do
+    /// `.background { Shape().glassEffect(...) }` the shape becomes a glass
+    /// element rendered on top of the underlying chrome — and SwiftUI ends
+    /// up compositing the text *under* the blur. Applying glassEffect to
+    /// the button puts the glass behind the button's foreground (label) as
+    /// intended.
+    @ViewBuilder
+    private func pill(for window: DashboardLoader.Window) -> some View {
+        let isSelected = selection == window
+        Button {
+            withAnimation(.bmGlassMorph) {
+                selection = window
+            }
+        } label: {
+            Text(window.label)
+                .font(.subheadline.weight(.medium))
+                .padding(.horizontal, Space.md)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+        }
+        .buttonStyle(.plain)
+        .background {
+            // Selected pill: solid tinted fill behind the text. Sits in the
+            // chrome layer per HIG ("glass = navigation, content = solid").
+            if isSelected {
+                RoundedRectangle(cornerRadius: Radius.medium, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.18))
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: Radius.medium))
+        .accessibilityLabel("Show \(window.label) window")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
