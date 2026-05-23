@@ -63,8 +63,19 @@ final class PanelController: NSObject {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isMovableByWindowBackground = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = true
+        // `.popUpMenu` (level 101) keeps the panel visible above standard
+        // windows of OTHER apps without needing `NSApp.activate(...)`. With
+        // the default `.floating` (3) the panel only floats relative to our
+        // own app's other windows — when the user is in Safari, our app is
+        // inactive and the panel ends up behind Safari's windows.
+        // Spotlight uses the same trick.
+        panel.level = .popUpMenu
+        // Don't auto-hide when our app deactivates — the user-visible
+        // workflow is "summon panel, use it, dismiss with Esc/click-out".
+        // Auto-hide-on-deactivate would close the panel as soon as we
+        // tried to interact, since our app is intentionally not activated
+        // when the panel is shown from a background context.
+        panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
