@@ -6,15 +6,35 @@ struct BetterMessagesApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // Menu bar entry — primary surface area for the app, since there's no Dock icon.
+        // Dashboard — the primary windowed surface. Declared FIRST so SwiftUI
+        // treats it as the default scene: opens on cold launch and reopens
+        // when the user clicks the Dock icon while no windows are visible.
+        // Generous default size so the chart and two top-lists fit
+        // side-by-side without crowding; a smaller min size keeps it usable
+        // when the user shrinks the window down.
+        Window("Dashboard", id: WindowID.dashboard) {
+            DashboardView()
+                .frame(minWidth: 900, minHeight: 620)
+                .containerBackground(.thinMaterial, for: .window)
+                // Publish `openWindow` to AppKit so AppDelegate can open the
+                // Dashboard on Dock-click (see `WindowOpener`).
+                .background(WindowOpenerBridge())
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .defaultSize(width: 1200, height: 800)
+        .windowResizability(.contentMinSize)
+
+        // Menu bar entry — secondary, ever-present surface for quick access
+        // to the panel, the browser, and Settings.
         MenuBarExtra("Better Messages", systemImage: "magnifyingglass.circle.fill") {
             MenuBarContent(appDelegate: appDelegate)
         }
         .menuBarExtraStyle(.menu)
 
-        // Browse window — secondary, opened from the menu (or from a button in the
-        // spotlight panel later). Not auto-opened: `LSUIElement = YES` plus `Window`
-        // (vs `WindowGroup`) means it only appears when explicitly requested.
+        // Browse window — secondary, opened from the menu bar or from a
+        // button in the spotlight panel. `Window` (vs `WindowGroup`) means it
+        // only appears when explicitly requested.
         Window("Better Messages", id: WindowID.browser) {
             ContentView()
                 .frame(minWidth: 960, minHeight: 620)
@@ -26,21 +46,6 @@ struct BetterMessagesApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1180, height: 760)
-        .windowResizability(.contentMinSize)
-
-        // Dashboard — analytics surface with frequency chart + top lists.
-        // Same window-level glass treatment as the browser. Generous default
-        // size so the chart and two top-lists fit side-by-side without
-        // crowding; a smaller min size keeps it usable when the user shrinks
-        // the window down.
-        Window("Dashboard", id: WindowID.dashboard) {
-            DashboardView()
-                .frame(minWidth: 900, minHeight: 620)
-                .containerBackground(.thinMaterial, for: .window)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unified(showsTitle: false))
-        .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentMinSize)
 
         // Settings — currently just hotkey rebinding. SettingsLink in the menu
@@ -128,5 +133,25 @@ private struct GeneralSettingsPane: View {
         .formStyle(.grouped)
         .padding(20)
         .frame(height: 200)
+    }
+}
+
+// MARK: - AppKit ↔ SwiftUI window-open bridge
+
+/// Invisible helper view that captures SwiftUI's `openWindow` action and
+/// hands it to `WindowOpener.shared`, so AppKit code (e.g. AppDelegate
+/// responding to a Dock-icon click) can open SwiftUI windows by id.
+private struct WindowOpenerBridge: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear {
+                WindowOpener.shared.open = { id in
+                    openWindow(id: id)
+                }
+            }
     }
 }
