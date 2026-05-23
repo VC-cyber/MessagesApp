@@ -56,6 +56,12 @@ public struct DashboardStats: Sendable {
     }
 
     /// One row in the "people you text the most" list.
+    ///
+    /// `avatarData` is the raw PNG/JPEG bytes of the contact's AddressBook
+    /// photo (already decoded out of the framing-byte format — see
+    /// `AvatarStorage.decode`). Nil when the contact has no photo or the
+    /// handle isn't in AddressBook at all; callers render an initials
+    /// monogram via `AvatarView`.
     public struct ContactStat: Sendable, Equatable, Identifiable {
         /// Stable key — resolved display name for known contacts; raw handle
         /// for unknowns. Used by SwiftUI for ForEach identity.
@@ -64,16 +70,19 @@ public struct DashboardStats: Sendable {
         public let sent: Int
         public let received: Int
         public let total: Int
+        public let avatarData: Data?
 
         public var id: String { key }
 
         public init(key: String, displayName: String,
-                    sent: Int, received: Int, total: Int) {
+                    sent: Int, received: Int, total: Int,
+                    avatarData: Data? = nil) {
             self.key = key
             self.displayName = displayName
             self.sent = sent
             self.received = received
             self.total = total
+            self.avatarData = avatarData
         }
     }
 
@@ -82,20 +91,38 @@ public struct DashboardStats: Sendable {
     /// `sentByYou` is the headline metric; `total` is the activity-floor (sent
     /// + received), shown as a secondary value. We rank by `sentByYou` per the
     /// spec — "groups you text the most" really means "groups where you talk".
+    ///
+    /// **Avatar contract**:
+    /// - `chatAvatarData` is non-nil when the group has a custom photo (set
+    ///   from inside Messages.app — stored as an attachment, looked up via
+    ///   `chat.properties.groupPhotoGuid`). Raw PNG/JPEG bytes ready for
+    ///   `NSImage(data:)`. See `docs/dashboard-avatars.md`.
+    /// - `participantAvatars` is the fallback feedstock: 0..3 raw PNG/JPEG
+    ///   blobs from the first few participants (a participant with no
+    ///   AddressBook photo contributes nil; callers preserve nil slots so
+    ///   the composite still shows a placeholder). Only populated when
+    ///   `chatAvatarData` is nil — when the group has its own photo, we
+    ///   don't compute the composite.
     public struct GroupStat: Sendable, Equatable, Identifiable {
         public let chatRowID: Int64
         public let displayName: String
         public let sentByYou: Int
         public let total: Int
+        public let chatAvatarData: Data?
+        public let participantAvatars: [Data?]
 
         public var id: Int64 { chatRowID }
 
         public init(chatRowID: Int64, displayName: String,
-                    sentByYou: Int, total: Int) {
+                    sentByYou: Int, total: Int,
+                    chatAvatarData: Data? = nil,
+                    participantAvatars: [Data?] = []) {
             self.chatRowID = chatRowID
             self.displayName = displayName
             self.sentByYou = sentByYou
             self.total = total
+            self.chatAvatarData = chatAvatarData
+            self.participantAvatars = participantAvatars
         }
     }
 

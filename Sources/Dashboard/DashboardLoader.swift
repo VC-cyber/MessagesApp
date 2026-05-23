@@ -320,11 +320,18 @@ public enum DashboardLoader {
 
         // Merge handles that resolve to the same display name (one person,
         // many handles). For unknown handles we still aggregate per handle.
+        //
+        // Avatar handling: the FIRST handle in a merged bucket that has an
+        // AddressBook photo wins. Multiple handles → same contact → one
+        // `Contact` → one `avatarData`. Resolved-name buckets take their
+        // avatar from the resolved Contact; handle-key buckets stay nil
+        // (raw handles never have a photo).
         struct Bucket {
             var name: String
             var sent: Int = 0
             var received: Int = 0
             var total: Int = 0
+            var avatarData: Data? = nil
         }
         var merged: [String: Bucket] = [:]
 
@@ -335,21 +342,31 @@ public enum DashboardLoader {
             let total: Int = row["total"] ?? 0
 
             let handle = Handle(raw: raw)
-            let resolvedName = contacts.byHandle[handle]?.displayName
+            let resolvedContact = contacts.byHandle[handle]
             let key: String
             let displayName: String
-            if let resolvedName, !resolvedName.isEmpty {
-                key = "name:\(resolvedName)"
-                displayName = resolvedName
+            let avatarData: Data?
+            if let resolved = resolvedContact, !resolved.displayName.isEmpty {
+                key = "name:\(resolved.displayName)"
+                displayName = resolved.displayName
+                avatarData = resolved.avatarData
             } else {
                 key = "handle:\(handle.normalized)"
                 displayName = raw
+                avatarData = nil
             }
 
             var bucket = merged[key] ?? Bucket(name: displayName)
             bucket.sent += sent
             bucket.received += received
             bucket.total += total
+            // First non-nil avatar wins. Multiple Sources / multiple handles
+            // for the same person can in principle disagree on photo, but
+            // empirically they don't — `ContactResolver` already collapsed
+            // them to a single `Contact.avatarData`.
+            if bucket.avatarData == nil, let avatarData {
+                bucket.avatarData = avatarData
+            }
             merged[key] = bucket
         }
 
@@ -360,7 +377,8 @@ public enum DashboardLoader {
                     displayName: b.name,
                     sent: b.sent,
                     received: b.received,
-                    total: b.total
+                    total: b.total,
+                    avatarData: b.avatarData
                 )
             }
             .sorted { lhs, rhs in
@@ -411,13 +429,25 @@ public enum DashboardLoader {
 
         let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
 
-        // Resolve labels for groups without a display name. We need the
-        // participant handle set — fetch in one shot for all candidate chats.
+        // Resolve labels AND participants for groups. The participant list
+        // serves two roles now:
+        //   1. Display-name fallback when `chat.display_name` is empty.
+        //   2. Avatar feedstock for the stacked-composite fallback when the
+        //      group has no custom photo.
+        // One query, both uses — saves a roundtrip per group.
         let candidateRowIDs = rows.compactMap { $0["chat_rowid"] as Int64? }
-        let participantNames = try loadGroupParticipantNames(
+        let participants = try loadGroupParticipants(
             db: db,
             chatRowIDs: candidateRowIDs,
             contacts: contacts
+        )
+
+        // Custom group photos (`chat.properties.groupPhotoGuid` →
+        // `attachment.filename` → bytes on disk). Empirically ~7% of groups
+        // have one set; the rest fall through to participant composites.
+        let chatPhotos = try ChatPhotoLoader.loadGroupPhotos(
+            db: db,
+            chatRowIDs: candidateRowIDs
         )
 
         var stats: [DashboardStats.GroupStat] = []
@@ -428,11 +458,13 @@ public enum DashboardLoader {
             let sent: Int = row["sent"] ?? 0
             let total: Int = row["total"] ?? 0
 
+            let participantInfo = participants[rowID] ?? []
+            let names = participantInfo.map(\.name)
+
             let label: String
             if let dn = displayName, !dn.trimmingCharacters(in: .whitespaces).isEmpty {
                 label = dn
             } else {
-                let names = participantNames[rowID] ?? []
                 if names.isEmpty {
                     label = "Group chat"
                 } else if names.count <= 3 {
@@ -443,23 +475,43 @@ public enum DashboardLoader {
                 }
             }
 
+            // Custom photo wins. Otherwise, take the first 3 participants'
+            // avatars (nil slots preserved so the composite can place
+            // placeholders in the right positions).
+            let chatAvatar = chatPhotos[rowID]
+            let participantAvatars: [Data?]
+            if chatAvatar != nil {
+                participantAvatars = []
+            } else {
+                participantAvatars = participantInfo.prefix(3).map(\.avatarData)
+            }
+
             stats.append(DashboardStats.GroupStat(
                 chatRowID: rowID,
                 displayName: label,
                 sentByYou: sent,
-                total: total
+                total: total,
+                chatAvatarData: chatAvatar,
+                participantAvatars: participantAvatars
             ))
         }
         return stats
     }
 
+    /// Per-participant info we need for a group row — name (for the label
+    /// fallback) and avatar bytes (for the composite-fallback).
+    struct GroupParticipant: Equatable {
+        let name: String
+        let avatarData: Data?
+    }
+
     /// One round-trip to fetch participant handles for a known set of chats,
-    /// resolved to display names in Swift.
-    private static func loadGroupParticipantNames(
+    /// resolved to display names + avatars in Swift.
+    static func loadGroupParticipants(
         db: Database,
         chatRowIDs: [Int64],
         contacts: ResolvedContacts
-    ) throws -> [Int64: [String]] {
+    ) throws -> [Int64: [GroupParticipant]] {
         guard !chatRowIDs.isEmpty else { return [:] }
         let placeholders = Array(repeating: "?", count: chatRowIDs.count).joined(separator: ", ")
         let sql = """
@@ -472,12 +524,15 @@ public enum DashboardLoader {
         for rowID in chatRowIDs { args.append(rowID) }
         let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
 
-        var byChat: [Int64: [String]] = [:]
+        var byChat: [Int64: [GroupParticipant]] = [:]
         for row in rows {
             guard let chatID: Int64 = row["chat_id"],
                   let rawHandle: String = row["handle_id"] else { continue }
-            let name = contacts.byHandle[Handle(raw: rawHandle)]?.displayName ?? rawHandle
-            byChat[chatID, default: []].append(name)
+            let resolved = contacts.byHandle[Handle(raw: rawHandle)]
+            let name = resolved?.displayName ?? rawHandle
+            byChat[chatID, default: []].append(
+                GroupParticipant(name: name, avatarData: resolved?.avatarData)
+            )
         }
         return byChat
     }
