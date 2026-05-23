@@ -110,13 +110,20 @@ public enum AttributedBodyDecoder {
         let v = scalar.value
         // Replacement char — invalid UTF-8 in source. Use as separator.
         if v == 0xFFFD { return false }
+        // OBJECT REPLACEMENT CHARACTER — NSAttributedString uses U+FFFC as
+        // an inline-attachment marker (every image/file embedded in a
+        // message's attributedBody is one of these). It's never user text;
+        // treating it as printable made attachment-only messages decode
+        // to "￼￼" instead of empty, which then masked the row's
+        // type-label placeholder (Image / Video / etc.).
+        if v == 0xFFFC { return false }
         // ASCII printable.
         if v >= 0x20 && v <= 0x7E { return true }
         // Useful whitespace.
         if v == 0x09 || v == 0x0A { return true }
         // Above-ASCII BMP, excluding C1 controls (already below by lower bound)
         // and surrogates (invalid as scalars anyway). Keep emoji + accents.
-        if v >= 0xA0 && v <= 0xFFFC { return true }
+        if v >= 0xA0 && v <= 0xFFFB { return true }
         // Supplementary planes — emoji live here (e.g. 🥺 = U+1F97A). Without
         // this branch, ending-emoji bytes get stripped, which throws off the
         // length-prefix strip (the rest's byte count no longer matches the
