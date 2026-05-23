@@ -14,9 +14,11 @@ import SwiftUI
 final class PanelController: NSObject {
     private var panel: SpotlightNSPanel?
     private let viewModel: SearchViewModel
+    private let recentSearches: RecentSearchesStore
 
-    init(viewModel: SearchViewModel) {
+    init(viewModel: SearchViewModel, recentSearches: RecentSearchesStore) {
         self.viewModel = viewModel
+        self.recentSearches = recentSearches
         super.init()
     }
 
@@ -83,9 +85,13 @@ final class PanelController: NSObject {
         panel.animationBehavior = .utilityWindow
 
         let host = NSHostingView(
-            rootView: SpotlightPanel(viewModel: viewModel, dismiss: { [weak self] in
-                self?.close()
-            })
+            rootView: SpotlightPanel(
+                viewModel: viewModel,
+                recentSearches: recentSearches,
+                dismiss: { [weak self] in
+                    self?.close()
+                }
+            )
         )
         host.translatesAutoresizingMaskIntoConstraints = false
         panel.contentView = host

@@ -13,7 +13,16 @@ import KeyboardShortcuts
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let viewModel = SearchViewModel()
-    private(set) lazy var panelController = PanelController(viewModel: viewModel)
+    /// Persistent history of recent searches, surfaced in the panel's
+    /// empty state. Shared singleton so the same store survives across
+    /// panel toggles (the panel can rebuild its View hierarchy on every
+    /// show; a per-view store would lose its in-memory cache between
+    /// toggles even though UserDefaults would persist).
+    let recentSearches = RecentSearchesStore()
+    private(set) lazy var panelController = PanelController(
+        viewModel: viewModel,
+        recentSearches: recentSearches
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Wire the global hotkey to toggle the spotlight panel.

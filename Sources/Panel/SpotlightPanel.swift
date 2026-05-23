@@ -7,10 +7,15 @@ import SwiftUI
 /// No sidebar — that's the browse window's job.
 struct SpotlightPanel: View {
     @Bindable var viewModel: SearchViewModel
+    @Bindable var recentSearches: RecentSearchesStore
     let dismiss: () -> Void
 
     @State private var selectedResultID: Int64?
     @State private var suggestionIndex: Int = 0
+
+    /// Whether the help-syntax sheet is currently overlaid on the panel.
+    /// Triggered by the `?` button in the footer or `⌘/`.
+    @State private var showHelp: Bool = false
 
     /// Example queries that crossfade through the placeholder slot while
     /// the search field is empty and unfocused. Each example demonstrates
@@ -112,6 +117,10 @@ struct SpotlightPanel: View {
     /// - **Legacy fallback** (`MessagesReveal`) — only if the message or chat
     ///   GUID is missing (shouldn't normally happen post-plumbing).
     private func reveal(_ result: MessageSearch.Result) {
+        // Opening a result is the strongest "this search was useful" signal —
+        // commit it to recents so the user can re-run it later from the
+        // empty state.
+        recentSearches.record(viewModel.query)
         if let messageGUID = result.message.guid,
            let chatGUID = result.chatGUID {
             // GUID path runs async; fire-and-forget so the panel can dismiss
@@ -170,13 +179,16 @@ struct SpotlightPanel: View {
                 // Enter handling:
                 // - Popover open → accept the highlighted suggestion.
                 // - Else if a result is highlighted → reveal in Messages.app.
-                // - Else → run the search immediately (skip debounce).
+                // - Else → run the search immediately (skip debounce) and
+                //   record the query as a recent (the user committed to
+                //   it by pressing Enter, even if no result was opened).
                 if !suggestions.isEmpty {
                     let idx = max(0, min(suggestionIndex, suggestions.count - 1))
                     acceptSuggestion(suggestions[idx])
                 } else if let pick = currentSelection {
                     reveal(pick)
                 } else {
+                    recentSearches.record(viewModel.query)
                     Task { await viewModel.search() }
                 }
             }
@@ -339,8 +351,11 @@ struct SpotlightPanel: View {
     private var emptyState: some View {
         VStack(spacing: Space.lg) {
             if viewModel.query.isEmpty {
-                // Empty-field state: show the magnifier + suggestions so
-                // first-time users discover that the grammar exists.
+                // Empty-field state: show the magnifier, the recents
+                // (if any), and the quick-filter suggestions. Recents
+                // come first because they're personalized — a returning
+                // user immediately sees something they've done before,
+                // not a generic affordance.
                 VStack(spacing: Space.xs) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 32, weight: .light))
@@ -348,6 +363,14 @@ struct SpotlightPanel: View {
                     Text("Search your messages")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+
+                if !recentSearches.entries.isEmpty {
+                    RecentSearchesList(
+                        entries: recentSearches.entries,
+                        onSelect: applyRecentSearch,
+                        onRemove: { recentSearches.remove($0) }
+                    )
                 }
 
                 EmptyStateSuggestions(onSelect: applyQuickFilter)
@@ -365,6 +388,16 @@ struct SpotlightPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Space.xl)
+    }
+
+    /// Re-run a saved query. We set `query` verbatim (no trailing space —
+    /// the user committed to this exact string before) and fire the search
+    /// immediately. The query is also re-recorded which moves it to the
+    /// top of the list (the implicit "use again to bump" behavior).
+    private func applyRecentSearch(_ query: String) {
+        viewModel.query = query
+        recentSearches.record(query)
+        Task { await viewModel.search() }
     }
 
     /// Apply a quick-filter pill to the query field and fire the search.
