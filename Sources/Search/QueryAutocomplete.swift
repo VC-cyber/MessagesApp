@@ -51,6 +51,9 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
     /// the literal `any`, or a kind name (`love`, `like`, `laugh`,
     /// `emphasize`, `question`, `dislike`). See `MessageSearch.parseQuery`.
     case reactions = "reactions:"
+    /// Content-type filter — `image`, `video`, `audio`, `sticker`, `link`,
+    /// `file`, `text`, `attachment`. See `MessageSearch.TypeFilter`.
+    case type = "type:"
 
     /// Display category for tinting/icons in the chip layer.
     public var category: TokenCategory {
@@ -59,6 +62,7 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
         case .from, .to: return .person
         case .before, .after, .on, .last: return .date
         case .reactions: return .reaction
+        case .type: return .type
         }
     }
 
@@ -74,7 +78,7 @@ public enum TokenPrefix: String, CaseIterable, Sendable, Hashable {
 
 /// Coarse-grained category for chip tinting in the UI.
 public enum TokenCategory: Sendable, Hashable {
-    case chat, person, date, reaction
+    case chat, person, date, reaction, type
 }
 
 public enum QueryAutocomplete {

@@ -70,6 +70,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
     case chat
     case freeText
     case reaction
+    case type
 
     var tint: Color {
         switch self {
@@ -78,6 +79,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
         case .chat: return .orange
         case .freeText: return .gray
         case .reaction: return .pink
+        case .type: return .teal
         }
     }
 
@@ -88,6 +90,7 @@ enum FilterCategory: String, Hashable, CaseIterable, Sendable {
         case .chat: return "bubble.left.and.bubble.right"
         case .freeText: return "text.magnifyingglass"
         case .reaction: return "heart.fill"
+        case .type: return "doc.richtext"
         }
     }
 }

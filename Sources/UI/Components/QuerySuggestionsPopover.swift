@@ -42,6 +42,7 @@ struct QuerySuggestion: Identifiable, Hashable {
         case person
         case date
         case reaction
+        case type
     }
 }
 
@@ -136,6 +137,7 @@ private struct SuggestionRow: View {
         case .person: return "person.crop.circle"
         case .date: return "calendar"
         case .reaction: return "heart.fill"
+        case .type: return "doc.richtext"
         }
     }
 
@@ -145,6 +147,7 @@ private struct SuggestionRow: View {
         case .person: return .blue
         case .date: return .purple
         case .reaction: return .pink
+        case .type: return .teal
         }
     }
 }

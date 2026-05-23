@@ -9,6 +9,11 @@ struct PreviewMessage: Identifiable, Hashable, Sendable {
     let id: UUID
     let sender: String
     let avatarInitials: String
+    /// Optional sender contact photo bytes (raw PNG / JPEG) — falls back to
+    /// `avatarInitials` when nil. Mirrors `MessageSearch.Result.senderAvatar`
+    /// so the browse window can swap in real data without a separate
+    /// conversion step.
+    let avatarData: Data?
     let body: String
     let timestamp: Date
     let chatName: String
@@ -24,6 +29,7 @@ struct PreviewMessage: Identifiable, Hashable, Sendable {
         id: UUID = UUID(),
         sender: String,
         avatarInitials: String,
+        avatarData: Data? = nil,
         body: String,
         timestamp: Date,
         chatName: String,
@@ -34,6 +40,7 @@ struct PreviewMessage: Identifiable, Hashable, Sendable {
         self.id = id
         self.sender = sender
         self.avatarInitials = avatarInitials
+        self.avatarData = avatarData
         self.body = body
         self.timestamp = timestamp
         self.chatName = chatName

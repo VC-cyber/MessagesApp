@@ -35,16 +35,24 @@ public struct AvatarView: View {
     /// is shown (the photo fills the circle).
     let tint: Color
 
+    /// Foreground color for the initials text in the fallback state. Defaults
+    /// to `.secondary`, which reads well against the default low-opacity
+    /// `tint`. Callers using a saturated tint (e.g. the browse window's
+    /// per-contact hue) should pass `.white` for legibility.
+    let initialsForeground: Color
+
     public init(
         imageData: Data?,
         initials: String,
         size: CGFloat,
-        tint: Color = Color.secondary.opacity(0.4)
+        tint: Color = Color.secondary.opacity(0.4),
+        initialsForeground: Color = .secondary
     ) {
         self.imageData = imageData
         self.initials = initials
         self.size = size
         self.tint = tint
+        self.initialsForeground = initialsForeground
     }
 
     public var body: some View {
@@ -61,7 +69,7 @@ public struct AvatarView: View {
                     Circle().fill(tint)
                     Text(initials)
                         .font(.system(size: initialsFontSize, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(initialsForeground)
                 }
                 .frame(width: size, height: size)
             }

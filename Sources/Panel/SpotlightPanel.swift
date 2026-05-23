@@ -39,6 +39,7 @@ struct SpotlightPanel: View {
             case .person: category = .person
             case .date: category = .dateRange
             case .reaction: category = .reaction
+            case .type: category = .type
             }
             out.append(.init(category: category, label: literal))
         }
@@ -429,13 +430,12 @@ private struct SpotlightResultRow: View {
     }
 
     private var avatar: some View {
-        ZStack {
-            Circle().fill(.tertiary.opacity(0.4))
-            Text(initials)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(width: 28, height: 28)
+        AvatarView(
+            imageData: result.senderAvatar,
+            initials: initials,
+            size: 28,
+            tint: .secondary.opacity(0.4)
+        )
     }
 
     private var initials: String {

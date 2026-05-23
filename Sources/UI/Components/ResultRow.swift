@@ -72,30 +72,26 @@ struct ResultRow: View {
     }
 
     private var avatar: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: avatarColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            Text(message.avatarInitials)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 36, height: 36)
-        .overlay(Circle().strokeBorder(Color.hairline, lineWidth: 0.5))
+        AvatarView(
+            imageData: message.avatarData,
+            initials: message.avatarInitials,
+            size: 36,
+            // Tint only kicks in for the initials fallback. We pick a
+            // deterministic hue from the sender's name so each contact's
+            // monogram lands on a stable, recognizable color — even when
+            // they don't have a photo. Matches the pre-avatar UX so the
+            // visual diff for unknown handles is zero.
+            tint: avatarFallbackColor,
+            initialsForeground: .white
+        )
     }
 
-    private var avatarColors: [Color] {
-        // Deterministic from sender so each contact gets a stable color.
+    /// Deterministic-by-sender tint for the initials fallback. Mid-saturation
+    /// so the white text reads cleanly on top. Same hashing approach as the
+    /// previous gradient — the monogram still looks "themed" to the contact.
+    private var avatarFallbackColor: Color {
         let hue = Double(abs(message.sender.hashValue) % 360) / 360.0
-        return [
-            Color(hue: hue, saturation: 0.55, brightness: 0.85),
-            Color(hue: hue, saturation: 0.70, brightness: 0.65),
-        ]
+        return Color(hue: hue, saturation: 0.55, brightness: 0.75)
     }
 
     private var header: some View {

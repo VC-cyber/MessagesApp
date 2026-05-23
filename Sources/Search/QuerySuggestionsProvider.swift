@@ -32,6 +32,14 @@ public enum QuerySuggestionsProvider {
         "love", "like", "laugh", "emphasize", "question", "dislike",
     ]
 
+    /// Fixed content-type suggestions. Common-first ordering — most users
+    /// reach for image / video, link comes next (link previews are very
+    /// common in modern chats), then the long tail.
+    static let typeSuggestions: [String] = [
+        "image", "video", "link", "audio", "sticker",
+        "file", "text", "attachment",
+    ]
+
     /// Build the suggestion list. Returns an empty list when the context
     /// can't be completed (or the partial value matches nothing).
     /// Internal visibility — `QuerySuggestion` (declared in
@@ -52,6 +60,8 @@ public enum QuerySuggestionsProvider {
             return dateSuggestions(partial: context.partialValue)
         case .reactions:
             return reactionSuggestions(partial: context.partialValue)
+        case .type:
+            return typeSuggestions(partial: context.partialValue)
         }
     }
 
@@ -124,6 +134,29 @@ public enum QuerySuggestionsProvider {
         case "emphasize": return "‼️ emphasized"
         case "question": return "❓ questioned"
         case "dislike": return "👎 disliked"
+        default: return nil
+        }
+    }
+
+    // MARK: - type
+
+    static func typeSuggestions(partial: String) -> [QuerySuggestion] {
+        let ranked = QueryAutocomplete.rank(typeSuggestions, partial: partial, limit: maxSuggestions)
+        return ranked.enumerated().map { idx, value in
+            QuerySuggestion(id: idx, value: value, kind: .type, subtitle: subtitle(forType: value))
+        }
+    }
+
+    private static func subtitle(forType value: String) -> String? {
+        switch value {
+        case "image": return "photos · image/*"
+        case "video": return "videos · video/*"
+        case "audio": return "voice notes · audio/*"
+        case "sticker": return "peel-and-stick stickers"
+        case "link": return "URL link previews"
+        case "file": return "PDFs, docs, other files"
+        case "text": return "plain text only — no attachments"
+        case "attachment": return "any non-text content"
         default: return nil
         }
     }

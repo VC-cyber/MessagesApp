@@ -52,19 +52,36 @@ public struct MessageSearch: Sendable {
         /// `MessageSearch.search` via a single batched `ReactionLoader` call
         /// after the main result query — never N+1.
         public let reactions: [Reaction]
+        /// Raw PNG / JPEG bytes of the sender's contact photo, resolved via
+        /// `ContactResolver`. Nil when the sender is "You" (we don't render
+        /// our own avatar for own-sent messages — the chat partner identity
+        /// matters more here), when the sender is an unresolved handle, or
+        /// when the resolved contact has no photo. UI falls back to initials
+        /// via `AvatarView`.
+        public let senderAvatar: Data?
+        /// What kind of content this message carries — text, image, video,
+        /// sticker, link preview, etc. Populated by a single batched
+        /// `AttachmentLoader.types(forMessageGUIDs:database:)` call after the
+        /// main result query (same place `reactions` are spliced in). Default
+        /// `.text` so empty-loader / lookup-miss / no-GUID rows stay textual.
+        public let messageType: MessageType
 
         public init(
             message: Message,
             partnerName: String,
             senderName: String,
             chatGUID: String? = nil,
-            reactions: [Reaction] = []
+            reactions: [Reaction] = [],
+            senderAvatar: Data? = nil,
+            messageType: MessageType = .text
         ) {
             self.message = message
             self.partnerName = partnerName
             self.senderName = senderName
             self.chatGUID = chatGUID
             self.reactions = reactions
+            self.senderAvatar = senderAvatar
+            self.messageType = messageType
         }
     }
 
@@ -103,9 +120,14 @@ public struct MessageSearch: Sendable {
     /// - Natural date strings as operator values: `before:yesterday`,
     ///   `after:"may 8 2026"`. Or as standalone tokens for callers using
     ///   `dateRange` directly. ISO `YYYY-MM-DD` and `MM/DD/YYYY` accepted.
+    /// - `type:image` / `type:video` / `type:audio` / `type:sticker` /
+    ///   `type:link` / `type:file` / `type:text` / `type:attachment`. Multiple
+    ///   `type:` tokens OR together (so `type:image type:video` = images OR
+    ///   videos). `type:attachment` is sugar for any non-text non-link kind.
     ///
-    /// All filters AND together. Caller-supplied `person` / `dateRange` AND
-    /// with anything parsed from the phrase.
+    /// All filters AND together (within a category — multiple `type:` tokens
+    /// OR within the type category, see above). Caller-supplied `person` /
+    /// `dateRange` AND with anything parsed from the phrase.
     public func search(
         phrase: String,
         person: Contact? = nil,
@@ -130,6 +152,7 @@ public struct MessageSearch: Sendable {
         let (fromSQL, fromArgs) = Self.fromClause(parsed.fromFilters, contacts: contacts)
         let (toSQL, toArgs) = Self.toClause(parsed.toFilters, contacts: contacts)
         let (reactionsSQL, reactionsArgs) = Self.reactionsClause(parsed.reactionFilters)
+        let typeSQL = Self.typeClause(parsed.typeFilters)
         let limitSQL = limit.map { _ in "LIMIT ?" } ?? ""
         let sql = """
             SELECT
@@ -156,6 +179,7 @@ public struct MessageSearch: Sendable {
               \(fromSQL)
               \(toSQL)
               \(reactionsSQL)
+              \(typeSQL)
             ORDER BY m.date DESC
             \(limitSQL)
             """
@@ -247,53 +271,74 @@ public struct MessageSearch: Sendable {
             )
 
             let sender: String
+            let senderAvatar: Data?
             if isFromMe {
                 sender = "You"
+                // "You" gets initials — we don't have a self-avatar source
+                // and surfacing it isn't useful in search results anyway
+                // (every own-sent row would carry it).
+                senderAvatar = nil
             } else if let raw = senderHandle {
                 sender = contacts.name(forRawHandle: raw)
+                senderAvatar = contacts.avatarData(forRawHandle: raw)
             } else {
                 sender = "(unknown)"
+                senderAvatar = nil
             }
 
             results.append(Result(
                 message: message,
                 partnerName: partner,
                 senderName: sender,
-                chatGUID: chatGUID
+                chatGUID: chatGUID,
+                senderAvatar: senderAvatar
             ))
         }
 
-        // Batched reaction load — ONE SQL query for the entire result set.
-        // We collect every target GUID, hand them to `ReactionLoader`, and
-        // splice reactions back onto each result. No N+1 in sight.
+        // Batched post-processing — ONE SQL query each for reactions and for
+        // message types. Both keyed off the same set of result message GUIDs;
+        // we collect once, then splice back in. No N+1 anywhere.
         //
-        // Pre-MVP: search has no concept of "include reactions" toggle — we
-        // always load them, since the UI now wants them on every row. If
-        // perf becomes a problem on huge result sets we'd add a flag here;
-        // the typical panel result is ≤ 200 rows so it's fine.
+        // Reactions: per-message tapback list. UI wants them on every row so
+        // we always load them. Failures load empty rather than blowing up the
+        // whole search — a broken reactions subquery shouldn't kill results.
+        //
+        // Types: per-message MessageType (text/image/video/audio/sticker/link/
+        // file/applePay/location/other) derived from the attachment join and
+        // balloon_bundle_id. Default `.text` so GUID-less rows (very old DBs)
+        // and absent-from-map rows keep the textual default.
         let guids = results.compactMap { $0.message.guid }
         let reactionMap: [String: [Reaction]]
+        let typeMap: [String: MessageType]
         if guids.isEmpty {
             reactionMap = [:]
+            typeMap = [:]
         } else {
-            // Failures load empty rather than failing the whole search —
-            // a broken reaction subquery shouldn't kill the user's search.
             reactionMap = (try? ReactionLoader.reactions(
                 forTargetGUIDs: guids,
                 database: database,
                 contacts: contacts
             )) ?? [:]
+            typeMap = (try? AttachmentLoader.types(
+                forMessageGUIDs: guids,
+                database: database
+            )) ?? [:]
         }
-        if !reactionMap.isEmpty {
+        if !reactionMap.isEmpty || !typeMap.isEmpty {
             results = results.map { r in
-                guard let guid = r.message.guid,
-                      let rxns = reactionMap[guid], !rxns.isEmpty else { return r }
+                let guid = r.message.guid
+                let rxns = guid.flatMap { reactionMap[$0] } ?? []
+                let kind = guid.flatMap { typeMap[$0] } ?? .text
+                // Skip allocating a new Result if there's nothing to splice.
+                if rxns.isEmpty && kind == .text { return r }
                 return Result(
                     message: r.message,
                     partnerName: r.partnerName,
                     senderName: r.senderName,
                     chatGUID: r.chatGUID,
-                    reactions: rxns
+                    reactions: rxns,
+                    senderAvatar: r.senderAvatar,
+                    messageType: kind
                 )
             }
         }
@@ -379,6 +424,58 @@ public struct MessageSearch: Sendable {
         }
     }
 
+    /// One content-type filter parsed from a `type:` token.
+    ///
+    /// `type:image`, `type:video`, `type:audio`, `type:sticker`, `type:link`,
+    /// `type:file`, `type:text`, `type:attachment` (sugar for any non-text
+    /// non-link). Unrecognized values fall through to free text.
+    ///
+    /// Multiple `type:` tokens OR together — `type:image type:video` means
+    /// "images OR videos". This matches user intuition: most filter prefixes
+    /// AND, but `type:` is a discriminator where OR is what people want.
+    public enum TypeFilter: Sendable, Equatable, Hashable {
+        case image
+        case video
+        case audio
+        case sticker
+        case link
+        case file
+        case text
+        /// Sugar — expands to `[image, video, audio, sticker, file, other]`
+        /// at SQL build time. Excludes `.text` and `.linkPreview`.
+        case attachment
+
+        /// Resolve the filter to the concrete `MessageType` values it matches.
+        public var messageTypes: [MessageType] {
+            switch self {
+            case .image:    return [.image]
+            case .video:    return [.video]
+            case .audio:    return [.audio]
+            case .sticker:  return [.sticker]
+            case .link:     return [.linkPreview]
+            case .file:     return [.file, .applePay, .location, .other]
+            case .text:     return [.text]
+            case .attachment: return [.image, .video, .audio, .sticker, .file, .other]
+            }
+        }
+
+        /// Parse a `type:` value. Returns nil for unrecognized inputs so the
+        /// caller can fall back to treating the whole token as free text.
+        public static func parse(_ value: String) -> TypeFilter? {
+            switch value.trimmingCharacters(in: .whitespaces).lowercased() {
+            case "image", "img", "photo": return .image
+            case "video", "vid": return .video
+            case "audio", "voice": return .audio
+            case "sticker": return .sticker
+            case "link", "url": return .link
+            case "file", "doc", "pdf": return .file
+            case "text", "plain": return .text
+            case "attachment", "media", "any": return .attachment
+            default: return nil
+            }
+        }
+    }
+
     /// Parsed structured query.
     ///
     /// All filters AND together. `freeText` feeds `parseNeedles`; the others
@@ -391,6 +488,9 @@ public struct MessageSearch: Sendable {
         public let dateRange: ClosedRange<Date>?
         /// Reaction-thresholds + kind filters parsed from `reactions:` tokens.
         public let reactionFilters: [ReactionFilter]
+        /// Content-type filters parsed from `type:` tokens. Multiple values
+        /// OR together (so `type:image type:video` matches both).
+        public let typeFilters: [TypeFilter]
         /// The tokens we recognized, in order, with their original spelling.
         /// Used by the UI to highlight active filters inline.
         public let tokens: [Token]
@@ -402,6 +502,7 @@ public struct MessageSearch: Sendable {
             toFilters: [String] = [],
             dateRange: ClosedRange<Date>? = nil,
             reactionFilters: [ReactionFilter] = [],
+            typeFilters: [TypeFilter] = [],
             tokens: [Token] = []
         ) {
             self.freeText = freeText
@@ -410,6 +511,7 @@ public struct MessageSearch: Sendable {
             self.toFilters = toFilters
             self.dateRange = dateRange
             self.reactionFilters = reactionFilters
+            self.typeFilters = typeFilters
             self.tokens = tokens
         }
     }
@@ -445,6 +547,7 @@ public struct MessageSearch: Sendable {
         var dateRanges: [ClosedRange<Date>] = []
         var dateInstants: [(TokenPrefix, Date)] = []
         var reactionFilters: [ReactionFilter] = []
+        var typeFilters: [TypeFilter] = []
         var recognized: [Token] = []
 
         for token in tokens {
@@ -476,6 +579,15 @@ public struct MessageSearch: Sendable {
                     // Unrecognized reactions value — treat the WHOLE token as
                     // free text so the user sees what they typed survive into
                     // results (matches how `foo:bar` falls through).
+                    if !freeText.isEmpty { freeText.append(" ") }
+                    freeText.append(String(phrase[token.range]))
+                    continue
+                }
+            case .type:
+                if let f = TypeFilter.parse(raw) {
+                    typeFilters.append(f)
+                } else {
+                    // Unrecognized type value — fall through to free text.
                     if !freeText.isEmpty { freeText.append(" ") }
                     freeText.append(String(phrase[token.range]))
                     continue
@@ -528,6 +640,7 @@ public struct MessageSearch: Sendable {
             toFilters: tos,
             dateRange: combined,
             reactionFilters: reactionFilters,
+            typeFilters: typeFilters,
             tokens: recognized
         )
     }
@@ -902,6 +1015,152 @@ public struct MessageSearch: Sendable {
         }
         if clauses.isEmpty { return ("", []) }
         return ("AND (" + clauses.joined(separator: " AND ") + ")", args)
+    }
+
+    /// Build the content-type predicate.
+    ///
+    /// Push as much as we can down to SQL so we don't waste candidates on the
+    /// Swift side. SQL handles two cuts:
+    ///   1. Attachment-based: messages whose ROWID is in the join target set
+    ///      with attachments matching the filter (image/video/audio/sticker/
+    ///      file mime prefix or is_sticker).
+    ///   2. Balloon-based: messages whose `balloon_bundle_id` matches the
+    ///      provider for link previews (`URLBalloonProvider`), Apple Pay,
+    ///      etc. Captured as a `balloon_bundle_id LIKE '%...%'` clause.
+    ///
+    /// `type:text` is special — it's the NEGATION of any-attachment AND
+    /// any-balloon. We emit:
+    ///   AND m.ROWID NOT IN (SELECT message_id FROM message_attachment_join)
+    ///   AND (m.balloon_bundle_id IS NULL OR m.balloon_bundle_id = '')
+    ///
+    /// `type:attachment` expands to `image OR video OR audio OR sticker OR file`
+    /// (any non-text non-link content type). See `TypeFilter.messageTypes`.
+    ///
+    /// Multiple `type:` filters OR together at the top level — `type:image
+    /// type:video` means "image OR video". This differs from how `chat:` /
+    /// `from:` work (those AND) because users overwhelmingly want OR for type.
+    ///
+    /// Empty input → no predicate.
+    static func typeClause(_ filters: [TypeFilter]) -> String {
+        guard !filters.isEmpty else { return "" }
+
+        // Flatten the requested types — dedup, preserving order. `attachment`
+        // sugar expands here. Multiple `type:` tokens unify into a single OR.
+        var requested: Set<MessageType> = []
+        for f in filters {
+            for t in f.messageTypes { requested.insert(t) }
+        }
+        guard !requested.isEmpty else { return "" }
+
+        // Special case: `type:text` (and nothing else) — exclude any row that
+        // has an attachment or a known balloon_bundle_id. We could mix text
+        // with other types (`type:text type:image` ⇒ "text OR image") but
+        // that's a strange query; we still support it via the union below.
+        let wantsText = requested.contains(.text)
+        // Attachment-based predicates: assembled into a single subquery
+        // against the join. Each MIME class contributes a row-filter on the
+        // attachment table; we union them in a single inner SELECT.
+        let mimePreds = mimePredicates(for: requested)
+        // Balloon-based predicates: link previews, Apple Pay, location, other.
+        let balloonPreds = balloonPredicates(for: requested)
+
+        var ors: [String] = []
+        if !mimePreds.isEmpty {
+            let mimeWhere = mimePreds.joined(separator: " OR ")
+            ors.append("""
+                m.ROWID IN (
+                    SELECT mj.message_id
+                    FROM message_attachment_join mj
+                    JOIN attachment a ON a.ROWID = mj.attachment_id
+                    WHERE \(mimeWhere)
+                )
+                """)
+        }
+        if !balloonPreds.isEmpty {
+            ors.append("(" + balloonPreds.joined(separator: " OR ") + ")")
+        }
+        if wantsText {
+            // A pure text message has no attachment row AND no balloon bundle.
+            // (Empty string treated equivalently to NULL — both occur in real
+            // DBs for the no-balloon case.)
+            ors.append("""
+                (
+                  m.ROWID NOT IN (SELECT mj.message_id FROM message_attachment_join mj)
+                  AND (m.balloon_bundle_id IS NULL OR m.balloon_bundle_id = '')
+                )
+                """)
+        }
+        if ors.isEmpty { return "" }
+        return "AND (" + ors.joined(separator: " OR ") + ")"
+    }
+
+    /// Build the per-attachment mime/sticker predicates for the requested
+    /// types. Each clause matches one attachment row's columns.
+    private static func mimePredicates(for kinds: Set<MessageType>) -> [String] {
+        var out: [String] = []
+        if kinds.contains(.sticker) {
+            out.append("a.is_sticker = 1")
+        }
+        if kinds.contains(.image) {
+            out.append("(a.mime_type LIKE 'image/%' AND (a.is_sticker = 0 OR a.is_sticker IS NULL))")
+        }
+        if kinds.contains(.video) {
+            out.append("a.mime_type LIKE 'video/%'")
+        }
+        if kinds.contains(.audio) {
+            out.append("a.mime_type LIKE 'audio/%'")
+        }
+        if kinds.contains(.file) {
+            // "File" here means: a real attachment row that ISN'T image/
+            // video/audio/sticker. PDFs, vcards, docx, source files, plugin
+            // payloads that didn't already get matched by balloon predicates.
+            out.append("""
+                (
+                  (a.is_sticker = 0 OR a.is_sticker IS NULL)
+                  AND (
+                    a.mime_type IS NULL OR a.mime_type = ''
+                    OR (
+                      a.mime_type NOT LIKE 'image/%'
+                      AND a.mime_type NOT LIKE 'video/%'
+                      AND a.mime_type NOT LIKE 'audio/%'
+                    )
+                  )
+                )
+                """)
+        }
+        return out
+    }
+
+    /// Build the balloon_bundle_id predicates for the requested types. Each
+    /// clause matches one row of `message` directly.
+    private static func balloonPredicates(for kinds: Set<MessageType>) -> [String] {
+        var out: [String] = []
+        if kinds.contains(.linkPreview) {
+            out.append("m.balloon_bundle_id LIKE '%URLBalloonProvider%'")
+        }
+        if kinds.contains(.applePay) {
+            out.append("(m.balloon_bundle_id LIKE '%PeerPaymentMessagesExtension%' OR m.balloon_bundle_id LIKE '%PassbookUI%')")
+        }
+        if kinds.contains(.location) {
+            out.append("m.balloon_bundle_id LIKE '%FindMyMessagesApp%'")
+        }
+        if kinds.contains(.other) {
+            // "Other" captures the remaining balloon plugins (GamePigeon,
+            // polls, handwriting, digital touch, …) — anything that has a
+            // balloon_bundle_id but isn't one we recognize. Used by
+            // `type:attachment` to sweep up plugin payloads.
+            out.append("""
+                (
+                  m.balloon_bundle_id IS NOT NULL
+                  AND m.balloon_bundle_id != ''
+                  AND m.balloon_bundle_id NOT LIKE '%URLBalloonProvider%'
+                  AND m.balloon_bundle_id NOT LIKE '%PeerPaymentMessagesExtension%'
+                  AND m.balloon_bundle_id NOT LIKE '%PassbookUI%'
+                  AND m.balloon_bundle_id NOT LIKE '%FindMyMessagesApp%'
+                )
+                """)
+        }
+        return out
     }
 
     /// Build the date predicate. Handles the nanoseconds-OR-seconds case from
