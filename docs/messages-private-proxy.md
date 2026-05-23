@@ -18,13 +18,11 @@ Testing date 2026-05-22.
 
 | # | Path | Result |
 |---|------|--------|
-| A | `/usr/bin/shortcuts` CLI — install/run a `.shortcut` that calls `OpenMessageIntent` | TBD |
-| B | `shortcuts://run-shortcut?name=…&input=…` URL scheme dispatch | TBD |
-| C | Direct XPC to Shortcuts.app's mach services (LNAction via Shortcuts) | TBD |
-| D | `CSSearchableItem` publish + `NSWorkspace.open` of `x-apple-appintents://…` URL through Spotlight | TBD |
-| E | `NSUserActivity` + LaunchAgent / utility plug-in (privileged donate) | TBD |
-
-Status filled in below as each is tested.
+| A | `/usr/bin/shortcuts` CLI — install/run a `.shortcut` that calls `OpenMessageIntent` | **NEGATIVE** — Shortcuts.app, siriactionsd, BackgroundShortcutRunner all lack the foreign-bundle entitlement. Even linkd (which has it) can't dispatch because Messages.app doesn't publish an AppIntent delegate endpoint to non-Apple-internal callers. |
+| B | `shortcuts://run-shortcut?name=…&input=…` URL scheme | **NEGATIVE (by inheritance)** — same dispatch path as A, same gate. |
+| C | Direct XPC to Shortcuts.app's mach services | **NEGATIVE (by inheritance)** — same gate. |
+| D | `CSSearchableItem` publish + Spotlight continuation | **NEGATIVE** — see D below. |
+| E | `NSUserActivity` + LaunchAgent / utility plug-in | **NEGATIVE (by inheritance)** — sibling-bundle helpers don't inherit Apple-only entitlements either. |
 
 ---
 
@@ -32,67 +30,22 @@ Status filled in below as each is tested.
 
 (see `scripts/probes/proxy-shortcuts-cli.sh`,
 `scripts/probes/proxy-build-shortcut.m`,
-`scripts/probes/proxy-list-workflow-actions.m`)
+`scripts/probes/proxy-list-workflow-actions.m`,
+`scripts/probes/proxy-linkd-services.m`)
 
 ### A.1 — Basic `shortcuts run` works
 
-Verified that the CLI is functional:
-```
-$ shortcuts list
-Show me where Kaus Meridionalis is.
-New Shortcut
-Hey Google
-...
-```
+The `shortcuts` CLI is functional and can list/run user-installed shortcuts.
 
-### A.2 — The Shortcut binary plist format
+### A.2 — Hand-built `.shortcut` files
 
-User's existing shortcuts live in `~/Library/Shortcuts/Shortcuts.sqlite` →
-`ZSHORTCUTACTIONS.ZDATA`. The format is a binary plist of `WFWorkflowAction`
-dicts, each with `WFWorkflowActionIdentifier` (e.g. `is.workflow.actions.sendmessage`)
-and `WFWorkflowActionParameters`.
+The `.shortcut` container is a binary plist of `WFWorkflowAction` dicts.
+`WFAppIntentExecutionAction` is the subclass for App-Intent-backed actions —
+carries `metadata: LNActionMetadata`, `fullyQualifiedLinkActionIdentifier`,
+and `mangledTypeName`. We could in principle construct one targeting
+`ChatKit.OpenMessageIntent` with a `MessageEntity(GUID)` parameter.
 
-Empirically catalogued from the user's installed shortcuts:
-  - `is.workflow.actions.getlastphoto`
-  - `is.workflow.actions.sendmessage` (with `IntentAppIdentifier =
-    "com.apple.MobileSMS"`)
-  - `is.workflow.actions.runworkflow`
-  - `is.workflow.actions.notification`
-  - …
-
-WorkflowKit has a class `WFAppIntentExecutionAction` (subclass of `WFAction`,
-also `WFLinkAction` which subclasses it). These represent App-Intent-backed
-actions. They expose `metadata: LNActionMetadata`,
-`fullyQualifiedLinkActionIdentifier: LNFullyQualifiedActionIdentifier`,
-and `mangledTypeName: NSString` — matching the `LNAction` we built in the
-prior LNConnection probe.
-
-### A.3 — Crafted Shortcut signing fails for hand-built plist
-
-Attempted to use `WFShortcutPackageFile initWithShortcutData:shortcutName:` +
-`extractShortcutFileRepresentationWithSigningMethod:error:` to build a
-`.shortcut` container in-process. Five candidate `WFWorkflowActionIdentifier`
-values tested:
-
-```
-[com.apple.WorkflowKit.RunAppIntent]                  FAIL: file doesn't exist
-[com.apple.MobileSMS.OpenMessageIntent]               FAIL: file doesn't exist
-[OpenMessageIntent]                                   FAIL: file doesn't exist
-[com.apple.shortcuts.action.appintent]                FAIL: file doesn't exist
-[com.apple.WorkflowKit.AppIntentExecutionAction]      FAIL: file doesn't exist
-```
-
-The "file doesn't exist" error is from
-`extractShortcutFileRepresentationWithSigningMethod:` — the underlying flow
-expects a directory structure on disk (`generateDirectoryStructureInDirectory:`)
-and we'd need to mimic Shortcuts.app's full export pipeline. Not impossible
-but extensive — and the resulting `.shortcut` would still need to be installed
-into Shortcuts.app and have the user run it.
-
-### A.4 — But: does Shortcuts.app even have the entitlement?
-
-Direct check of `/System/Applications/Shortcuts.app` and
-`/usr/libexec/siriactionsd` (the daemon that actually runs shortcuts):
+### A.3 — But: who actually has the foreign-bundle entitlement?
 
 ```
 $ codesign -d --entitlements - /System/Applications/Shortcuts.app | grep foreign-bundle
@@ -103,128 +56,137 @@ $ codesign -d --entitlements - /System/Library/PrivateFrameworks/WorkflowKit.fra
 (no match)
 ```
 
-**Neither Shortcuts.app nor siriactionsd nor BackgroundShortcutRunner has
-`com.apple.private.appintents.exception.allow-foreign-bundle-identifiers`**.
-This entitlement is what's required to invoke an AppIntent of a foreign
-bundle (per the LNConnection error in the prior research). Without it,
-Shortcuts.app cannot dispatch an `OpenMessageIntent` to Messages.app any
-better than we can.
+**None of the Shortcuts execution layer has the foreign-bundle entitlement.**
+Routing through Shortcuts changes *who* the caller is, but doesn't change
+whether the caller is entitled to dispatch to Messages.app.
 
-Who DOES have it? Empirical scan of `/usr/libexec`, system XPCServices, and
-private frameworks:
-  - `/usr/libexec/linkd` (the AppIntents/LinkServices daemon)
-  - `/System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted`
+System-wide scan for who DOES have it: `/usr/libexec/linkd` and
+`/System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted`.
 
-linkd is the broker. Its mach services include:
-  - `com.apple.intents.intents-helper`
-  - `com.apple.linkd.registry`
-  - `com.apple.linkd.transcript.privileged`
-  - `com.apple.linkd.transcript.observing`
-  - `com.apple.appIntents.relevantIntentProvided`
-  - `com.apple.CascadeSets.DonateNow`
-  - …
-
-`launchctl print gui/501` only shows three published delegate endpoints:
+`launchctl print gui/501` shows only three delegate endpoints published:
 `com.apple.private.appintents.delegate.com.apple.homed`,
-`.intelligenceplatformd`, `.appstorecomponentsd`. There is **no
-`delegate.com.apple.MobileSMS`** — even linkd can't dispatch to Messages
-because Messages.app does not register an AppIntent delegate endpoint
-(consistent with the prior research's `launchctl print` finding).
+`.intelligenceplatformd`, and `.appstorecomponentsd`. **There is no
+`delegate.com.apple.MobileSMS`** — meaning even linkd cannot dispatch to
+Messages.app, because Messages.app does not register an AppIntent delegate
+endpoint to non-Apple-internal callers.
 
-### A.5 — Probing linkd XPC services from our (unentitled) process
+### A.4 — Verdict
 
-```
-[com.apple.intents.intents-helper]               Connection invalid
-[com.apple.linkd.registry]                       Connection interrupted
-[com.apple.linkd.transcript.privileged]          Connection invalid
-[com.apple.linkd.transcript.observing]           Connection invalid
-[com.apple.linkd.synchronizeMetadataStore]       Connection invalid
-[com.apple.linkd.update-registry]                Connection invalid
-[com.apple.linkd.prune-transcript]               Connection invalid
-[com.apple.link.XPCEventDispatcher]              Connection invalid
-[com.apple.appIntents.relevantIntentProvided]    Connection invalid
-[com.apple.CascadeSets.DonateNow]                Connection invalid
-```
+The dispatch failure isn't about caller identity. It's about Messages.app
+not advertising its AppIntent delegate endpoint outside Apple's own daemons.
+`OpenMessageIntent` is `isDiscoverable: false` AND the bundle doesn't
+publish its delegate. Routing through a privileged proxy doesn't help when
+the destination doesn't accept the call.
 
-"Connection interrupted" on `linkd.registry` is the closest we get — it
-accepts the connection then drops it. The others reject our entitlements
-outright. So the LinkD/Intents-helper APIs are not reachable from us.
-
-### A.6 — Verdict: Hypothesis A negative
-
-  1. We could in principle build a `.shortcut` file with the right
-     `WFAppIntentExecutionAction` for `ChatKit.OpenMessageIntent`, but…
-  2. Shortcuts.app, siriactionsd, and BackgroundShortcutRunner all **lack**
-     the foreign-bundle entitlement, so even if we got them to try to run
-     the action, they would hit the same XPC dispatcher block.
-  3. The only daemon that has the entitlement (`linkd`) cannot publish to
-     `com.apple.MobileSMS` because Messages.app does not register an
-     AppIntent delegate endpoint.
-
-So Hypothesis A is a **negative result**: routing through Shortcuts changes
-*who* the caller is, but the dispatch failure isn't actually about the
-caller's identity — it's about Messages.app not advertising a public AppIntent
-delegate endpoint at all. The `OpenMessageIntent` is `isDiscoverable: false`
-and the bundle doesn't publish its delegate to non-Apple-internal clients.
+This single finding kills A, B, C, and E as a class.
 
 ---
 
-## Hypothesis B — `shortcuts://` URL scheme
-
-(see `scripts/probes/proxy-shortcuts-url.sh`)
-
-Documented at https://support.apple.com/guide/shortcuts-mac/url-scheme-apdf22b0444c/mac
-
-  - `shortcuts://run-shortcut?name=<name>&input=<input>`
-  - `shortcuts://open-shortcut?name=<name>` — edit, not run
-
-Result: TBD.
-
----
-
-## Hypothesis C — Shortcuts.app's XPC
-
-(see `scripts/probes/proxy-shortcuts-xpc.sh`)
-
-Inspect Shortcuts.app XPC services:
-  - `com.apple.shortcuts.runtime` (siriactionsd) — main runtime
-  - `com.apple.WorkflowKit.BackgroundShortcutRunner` (XPC service)
-
-`launchctl print` to see endpoint connectivity; `strings` to find selector.
-
-Result: TBD.
-
----
-
-## Hypothesis D — CSSearchableItem + Spotlight continuation
+## Hypothesis D — Spotlight continuation
 
 (see `scripts/probes/proxy-spotlight-continuation.swift`)
 
-Publish a CSSearchableItem with `uniqueIdentifier` = `x-apple-appintents://com.apple.MobileSMS/MessageEntity/<GUID>`.
+### D.1 — `NSUserActivity.webpageURL` rejects the scheme
 
-Two pathways to test:
+Attempting to construct an `NSUserActivity` with `webpageURL` set to
+`x-apple-appintents://com.apple.MobileSMS/MessageEntity/<GUID>` raises:
 
-  1. **Index-then-tap** — user must tap the result in Spotlight (manual).
-  2. **NSUserActivity continuation** — programmatically synthesize an activity
-     with `activityType = CSSearchableItemActionType` and `userInfo[CSSearchableItemActivityIdentifier] = <url>`
-     then `becomeCurrent()`. The activity is meant to be delivered via
-     Handoff/Spotlight tap — we can't fake the cross-app delivery.
+```
+NSInvalidArgumentException: NSUserActivity.webpageURL scheme "x-apple-appintents" is not allowed.
+```
 
-Result: TBD.
+Enforced by `+[UAUserActivity(Internal) checkWebpageURL:actionType:throwIfFailed:]`.
+The runtime explicitly disallows this scheme on user activities. So even if
+the privileged route worked, we couldn't get the URL into the activity.
 
----
+### D.2 — `CSSearchableItem` indexing works, but routes back to US
 
-## Hypothesis E — LaunchAgent helper
+`CSSearchableIndex.default().indexSearchableItems([item])` succeeds with our
+URL as the `uniqueIdentifier`. `CSSearchQuery` retrieves it. But when an
+indexed item is tapped, the system synthesizes an `NSUserActivity` and
+delivers it to the **indexing process** (Better Messages), not to
+`com.apple.MobileSMS`. The `domainIdentifier` is informational; it doesn't
+transfer ownership.
 
-Out-of-process helper (a `LaunchAgent` plist) runs as a separate process. May
-be granted sandbox-relaxed treatment for our own bundle. Investigate whether a
-helper bundle, signed with the same Team ID, inherits the necessary AppIntents
-entitlement — almost certainly no, but worth confirming.
+Apple's documented Spotlight indexing for a foreign app is done via
+`CSImportExtension` plug-ins — and the plug-in's principal class must be
+inside the owning app's bundle. We can't publish in Messages.app's name.
 
-Result: TBD.
+### D.3 — Messages.app's own Spotlight indexing is not active
+
+```
+mdfind 'kMDItemDomainIdentifier == "com.apple.MobileSMS"'   → 0
+mdfind 'kMDItemContentType == "com.apple.imessage.message"' → 0
+```
+
+Messages.app declares `CoreSpotlightContinuation = true` in its Info.plist
+and registers a `com.apple.MobileSMS.spotlight` extension container, but the
+indexer is dormant on macOS 26.5:
+
+```
+~/Library/Containers/com.apple.MobileSMS.spotlight/Data/Library/Preferences/com.apple.IMCoreSpotlight.plist
+  → IMCSNeedsDeferredIndexing = true
+```
+
+No messages are actually indexed. So even if we could leverage an existing
+indexed MessageEntity to obtain its native URL, there ARE none on this
+machine. (Likely Apple is rolling this out gradually, gated on user opt-in.)
+
+### D.4 — Direct LS open with explicit Messages.app target
+
+```
+NSWorkspace.shared.open([url], withApplicationAt: Messages.app, configuration: …)
+  → app=Messages err=nil
+  but Messages.app's front window title doesn't change
+```
+
+LaunchServices delivers the URL to Messages.app's `application:openURLs:` /
+`scene:openURLContexts:`, but Messages.app's URL handlers silently drop
+the `x-apple-appintents` scheme — it's not in `CFBundleURLTypes`.
+
+### D.5 — Verdict
+
+Spotlight continuation as a backdoor relies on three things, none of which we
+get:
+1. Messages.app actively indexing its messages into Spotlight (it isn't).
+2. The Spotlight tap delivering the activity to the URL's owner (it
+   delivers to the indexer, which is us).
+3. The activity construction accepting `x-apple-appintents://` URLs
+   (the runtime forbids it).
 
 ---
 
 ## Final verdict
 
-(Filled in once all hypotheses are tested.)
+**The privileged-proxy hypothesis is false on macOS 26.5.** No path exists by
+which a third-party unentitled app can trigger Messages.app to reveal a
+specific message by GUID, because:
+
+1. **Messages.app does not publish its AppIntent delegate endpoint** to
+   non-Apple-internal callers. Even daemons that have the foreign-bundle
+   entitlement (linkd) cannot reach it.
+2. **Privileged proxies (Shortcuts, siriactionsd) themselves lack the
+   foreign-bundle entitlement** — they can't dispatch the intent either.
+3. **`NSUserActivity` rejects the AppIntents URL scheme** at runtime,
+   blocking the synthesized-continuation route.
+4. **Spotlight continuation owners are the indexer**, not the URL target —
+   we cannot index in Messages.app's name, and Messages.app's own indexer
+   is dormant.
+
+The `ChatKit.OpenMessageIntent` path IS the right answer — it's just gated
+behind entitlements that Apple only grants to specific licensees. Our
+`LNAction` pipeline in `scripts/probes/probe-lnconn-perform.m` would
+activate the day we ship as an entitled extension or Apple grants
+`com.apple.private.appintents.exception.allow-foreign-bundle-identifiers`
+to us.
+
+## What's left — Plan B (AX iterative scroll)
+
+The previous research recommended an iterative `AXScrollUpByPage` loop in
+`MessagesGUIDReveal.scrollToMessage(matchingDescriptionNeedles:)`: repeatedly
+page Messages.app's `TranscriptCollectionView` upward until either the
+target bubble appears in the AX tree or a sane bound (~50 pages / 5 seconds)
+hits. This closes the lazy-load gap (the user's reported failure mode — old
+messages don't appear in the loaded bubble set) without privileged IPC.
+
+~50 lines of Swift, no entitlement required. **This is the path forward.**
