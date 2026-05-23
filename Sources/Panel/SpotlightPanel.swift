@@ -319,16 +319,48 @@ struct SpotlightPanel: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: Space.sm) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 36, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text(viewModel.query.isEmpty ? "Start typing to search your messages." : "No matches.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        VStack(spacing: Space.lg) {
+            if viewModel.query.isEmpty {
+                // Empty-field state: show the magnifier + suggestions so
+                // first-time users discover that the grammar exists.
+                VStack(spacing: Space.xs) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("Search your messages")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                EmptyStateSuggestions(onSelect: applyQuickFilter)
+            } else {
+                // Non-empty field but no results — the search ran and
+                // produced nothing. Keep this terse; the next commit will
+                // add intelligent "try this instead" rescue suggestions.
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("No matches.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Space.xl)
+    }
+
+    /// Apply a quick-filter pill to the query field and fire the search.
+    ///
+    /// Implementation: we just set `viewModel.query` to the token (with a
+    /// trailing space so the user can keep typing free text after it if
+    /// they want — feels natural since the autocomplete popover does the
+    /// same thing on accept). The `.onChange(of: query)` handler kicks off
+    /// the debounced search automatically, but we also call `search()`
+    /// directly so the user doesn't have to wait the debounce window for a
+    /// pill they just clicked.
+    private func applyQuickFilter(_ suggestion: EmptyStateSuggestion) {
+        viewModel.query = suggestion.token + " "
+        Task { await viewModel.search() }
     }
 
     private func accessDeniedState(message: String) -> some View {
