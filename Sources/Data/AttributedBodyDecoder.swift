@@ -245,6 +245,44 @@ public enum AttributedBodyDecoder {
             return true
         }
 
+        // Bare canonical UUID. When an attachment-only message embeds the
+        // attachment.guid next to `__kIMFileTransferGUIDAttributeName`, the
+        // GUID itself decodes as a standalone 36-char run in the typedstream.
+        // The leading typedstream length byte (often '$' = 0x24 = 36, matching
+        // the canonical UUID length) is in our framing-edge charset and gets
+        // trimmed before stripLengthPrefix sees it, so neither that nor the
+        // `at_<n>_<UUID>` rule above catches it. A run that is EXACTLY a
+        // canonical UUID is almost certainly an attachment or message
+        // identifier — real bodies with a UUID embedded ("the GUID is …")
+        // never decode as the exact 36-char form because the surrounding text
+        // keeps the run longer.
+        if isCanonicalUUID(run) { return true }
+
         return false
+    }
+
+    /// True iff `run` is EXACTLY a canonical UUID — 36 characters of the
+    /// form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` where each `x` is a hex
+    /// digit (0-9, A-F, a-f). Case-insensitive. Strict equality only — any
+    /// surrounding character (whitespace, punctuation, prefix, suffix) makes
+    /// this return false, so legitimate sentences mentioning a UUID
+    /// ("the GUID is 6063E5D5-…") are preserved.
+    static func isCanonicalUUID(_ run: String) -> Bool {
+        // Fast-fail: byte length must be exactly 36 and we only deal with
+        // ASCII here. utf8.count is O(1) on stored UTF-8.
+        guard run.utf8.count == 36, run.count == 36 else { return false }
+        let hyphens: Set<Int> = [8, 13, 18, 23]
+        for (i, scalar) in run.unicodeScalars.enumerated() {
+            let v = scalar.value
+            if hyphens.contains(i) {
+                if v != 0x2D /* '-' */ { return false }
+            } else {
+                let isDigit = v >= 0x30 && v <= 0x39
+                let isLowerHex = v >= 0x61 && v <= 0x66
+                let isUpperHex = v >= 0x41 && v <= 0x46
+                if !isDigit && !isLowerHex && !isUpperHex { return false }
+            }
+        }
+        return true
     }
 }
