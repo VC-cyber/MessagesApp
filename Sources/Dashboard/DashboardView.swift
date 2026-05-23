@@ -181,7 +181,8 @@ struct DashboardView: View {
                         displayName: stat.displayName,
                         primary: stat.total,
                         secondaryPair: .init(left: stat.sent, right: stat.received),
-                        secondaryLabel: nil
+                        secondaryLabel: nil,
+                        avatar: .person(photo: stat.avatarData)
                     )
                 },
                 primaryLabel: "Total",
@@ -204,7 +205,8 @@ struct DashboardView: View {
                         displayName: stat.displayName,
                         primary: stat.sentByYou,
                         secondaryPair: nil,
-                        secondaryLabel: "\(stat.sentByYou.formatted(.number)) sent · \(stat.total.formatted(.number)) total"
+                        secondaryLabel: "\(stat.sentByYou.formatted(.number)) sent · \(stat.total.formatted(.number)) total",
+                        avatar: groupAvatar(for: stat)
                     )
                 },
                 primaryLabel: "Sent by you",
@@ -213,6 +215,16 @@ struct DashboardView: View {
                 emptyMessage: "No group chats in this window."
             )
         }
+    }
+
+    /// Pick the right `TopListEntry.Avatar` case for a group stat. A custom
+    /// group photo wins; otherwise we render a stacked composite of the
+    /// first few participants' avatars.
+    private func groupAvatar(for stat: DashboardStats.GroupStat) -> TopListEntry.Avatar {
+        if let bytes = stat.chatAvatarData {
+            return .groupPhoto(bytes)
+        }
+        return .groupComposite(participants: stat.participantAvatars)
     }
 
     private func errorPanel(_ message: String) -> some View {

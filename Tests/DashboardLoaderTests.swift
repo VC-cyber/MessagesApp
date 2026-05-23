@@ -69,8 +69,11 @@ final class DashboardLoaderTests: XCTestCase {
             calendar: calendar
         )
 
-        XCTAssertEqual(stats.overview.total, 20, "Expect 20 real messages (30 rows minus 10 tapbacks/reactions).")
-        XCTAssertEqual(stats.overview.sent, 14)
+        // Fixture has 31 message rows: 21 real (associated_message_type=0)
+        // and 10 tapbacks/reactions. Sent = 15, received = 6.
+        // (Updated when row 202 — the UUID-leak fixture — was added.)
+        XCTAssertEqual(stats.overview.total, 21, "Expect 21 real messages (31 rows minus 10 tapbacks/reactions).")
+        XCTAssertEqual(stats.overview.sent, 15)
         XCTAssertEqual(stats.overview.received, 6)
         XCTAssertEqual(stats.overview.chats, 4)
         XCTAssertNotNil(stats.overview.oldest)
@@ -291,11 +294,12 @@ final class DashboardLoaderTests: XCTestCase {
             now: testNow, calendar: calendar
         )
 
-        // Total of 30 messages, 10 of them are tapbacks/reactions
-        // (rows 4, 6, 7, 8, 9, 10, 11, 12, 13, 140). So real = 20.
+        // Total of 31 messages, 10 of them are tapbacks/reactions
+        // (rows 4, 6, 7, 8, 9, 10, 11, 12, 13, 140). So real = 21.
         // (Rows 200/201 are length-prefix-bug fixture rows added by
-        // features-agent; they're real sent messages and DO count.)
-        XCTAssertEqual(stats.overview.total, 20,
+        // features-agent; row 202 is the UUID-leak fixture. All three are
+        // real sent messages and DO count.)
+        XCTAssertEqual(stats.overview.total, 21,
                        "Tapback/reaction rows must NOT count.")
     }
 
