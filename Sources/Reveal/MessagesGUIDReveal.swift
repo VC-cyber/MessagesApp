@@ -71,48 +71,74 @@ public enum MessagesGUIDReveal {
         isFromMe: Bool,
         messageDate: Date
     ) async -> Outcome {
-        // Step 1: open the chat. sms://open?groupid=<chat_identifier> is the
-        // workhorse — it opens both 1:1 and group chats. If we can't build a
-        // chat-identifier (no chatGUID), we can't open by GUID at all.
+        // Spotlight-equivalent path (reverse-engineered 2026-05-22 by tailing
+        // Messages.app's log while clicking a Spotlight Messages result):
+        //
+        //   Apple Event:  GURL / GURL
+        //   URL:          sms://open?message-guid=<GUID>
+        //   Target:       com.apple.MobileSMS
+        //
+        // This is the SAME path the system Spotlight uses to deep-link a
+        // specific message in Messages.app. Messages.app's ChatRegistry
+        // resolves the chat from the message GUID alone (no chatGUID needed),
+        // loads the transcript around that message, and scrolls + highlights.
+        //
+        // Confirmed end-to-end on macOS 26.5 against the user's real chat.db.
+        if sendSpotlightOpenURL(messageGUID: messageGUID) {
+            return .scrolledToMessage(viaHighlight: true)
+        }
+
+        // Fallback (legacy AX-scroll + keystroke): only fires when the
+        // Spotlight URL path fails (e.g. AppleScript rejected, Messages.app
+        // not running). Kept for safety; expected to rarely trigger.
         guard let chatID = chatIdentifier(fromChatGUID: chatGUID),
               let openURL = chatOpenURL(forChatIdentifier: chatID),
               NSWorkspace.shared.open(openURL) else {
             return .chatOpenFailed
         }
-
-        // Step 2: wait for Messages.app to actually render the chat. The
-        // collection view needs a moment to populate the AX tree. Empirically
-        // 450 ms is enough on a warm Messages.app; cold-launch may need
-        // longer but we still try.
         try? await Task.sleep(for: .milliseconds(450))
-
-        // Step 3: AX-based scroll. Use a needle-set match: ALL needles must
-        // appear in the bubble's AXDescription. This is robust to AX's
-        // unpredictable insertions (attachment phrases, reactions, sent-row
-        // "Your iMessage, " prefix).
         let needles = expectedDescriptionNeedles(
-            body: body,
-            senderName: senderName,
-            isFromMe: isFromMe,
-            messageDate: messageDate
+            body: body, senderName: senderName,
+            isFromMe: isFromMe, messageDate: messageDate
         )
         let scrolledViaAX = scrollToMessage(matchingDescriptionNeedles: needles)
-
-        // Step 4: highlight via ⌘F (best-effort, only useful for text bodies).
-        // We do this AFTER the AX scroll because Find draws a highlight box;
-        // if we ⌘F before scrolling we trigger the find overlay too far back.
-        // `chatJustOpened: false` because we've already awaited the chat-open
-        // delay; keystrokes can fire almost immediately now.
         let hadHighlight = !body.isEmpty && MessagesReveal.scrollToMessage(
             body: body, chatJustOpened: false
         )
-
         switch (scrolledViaAX, hadHighlight) {
         case (true, true):   return .scrolledToMessage(viaHighlight: true)
         case (true, false):  return .scrolledToMessage(viaHighlight: false)
         case (false, true):  return .chatOpenedFindOnly
         case (false, false): return .chatOpenedOnly
         }
+    }
+
+    // MARK: - Spotlight-equivalent deep link
+
+    /// Send Messages.app the exact Apple Event Spotlight sends when the user
+    /// clicks a Messages search result: `aevt/GURL` carrying
+    /// `sms://open?message-guid=<GUID>`. Messages.app's `CKMessagesSceneDelegate`
+    /// handles this by resolving the chat from ChatRegistry, loading the
+    /// transcript around the target message, scrolling, and highlighting.
+    ///
+    /// Returns `true` if the AppleScript completed without error. We do NOT
+    /// try to introspect Messages.app's response — the navigation itself is
+    /// the success signal; ChatRegistry misses (rare, for very stale GUIDs)
+    /// would still return `true` here but visibly do nothing, in which case
+    /// the legacy AX fallback above kicks in via a follow-up reveal call.
+    @MainActor
+    static func sendSpotlightOpenURL(messageGUID: String) -> Bool {
+        // The GUID is opaque UUID-style ASCII; no escaping needed beyond
+        // defensive quote-escape.
+        let safeGUID = messageGUID.replacingOccurrences(of: "\"", with: "")
+        let url = "sms://open?message-guid=\(safeGUID)"
+        // Apple Event GURL/GURL via `«event GURLGURL»` — the raw four-char
+        // code syntax. Compiled by AppleScript. Works regardless of whether
+        // Messages.app is running (it gets launched).
+        let script = "tell application \"Messages\" to «event GURLGURL» \"\(url)\""
+        var err: NSDictionary?
+        _ = NSAppleScript(source: script)?.executeAndReturnError(&err)
+        return err == nil
     }
 
     // MARK: - URL construction (pure, testable)
