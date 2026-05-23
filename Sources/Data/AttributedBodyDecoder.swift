@@ -81,6 +81,11 @@ public enum AttributedBodyDecoder {
         // Above-ASCII BMP, excluding C1 controls (already below by lower bound)
         // and surrogates (invalid as scalars anyway). Keep emoji + accents.
         if v >= 0xA0 && v <= 0xFFFC { return true }
+        // Supplementary planes — emoji live here (e.g. 🥺 = U+1F97A). Without
+        // this branch, ending-emoji bytes get stripped, which throws off the
+        // length-prefix strip (the rest's byte count no longer matches the
+        // leading length byte, so we leak it).
+        if v >= 0x10000 && v <= 0x10FFFF { return true }
         return false
     }
 
@@ -139,8 +144,21 @@ public enum AttributedBodyDecoder {
         // when its byte value sits in printable-ASCII range (0x20–0x7E).
         guard v >= 0x20 && v <= 0x7E else { return run }
         let rest = String(run.unicodeScalars.dropFirst())
-        guard rest.utf8.count == v else { return run }
-        return rest
+        if rest.utf8.count == v { return rest }
+
+        // Fallback heuristic: leading ASCII digit (0–9) immediately followed
+        // by an uppercase letter is virtually never legitimate user content
+        // (people write "2 hours", "1st place", "200 dollars" — never "6Noah"
+        // or "2Looks"). When the precise-length-match above fails (typically
+        // because the message has trailing typedstream metadata glued onto
+        // the same run, throwing off the byte count), this catches the
+        // digit-then-uppercase pattern explicitly.
+        if (0x30...0x39).contains(v),
+           let secondScalar = rest.unicodeScalars.first,
+           secondScalar.value >= 0x41 && secondScalar.value <= 0x5A {
+            return rest
+        }
+        return run
     }
 
     /// True if the run is typedstream metadata (class name or IMCore attribute
