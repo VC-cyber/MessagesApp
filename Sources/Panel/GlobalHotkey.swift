@@ -5,14 +5,15 @@ import KeyboardShortcuts
 /// The default summons the spotlight panel. The user can rebind it in
 /// Settings via `KeyboardShortcuts.Recorder(for: .toggleSpotlightPanel)`.
 extension KeyboardShortcuts.Name {
-    /// Default ⌥⇧Space. Chosen because:
-    /// - ⌃Space is grabbed by macOS for input-source switching
+    /// Default ⌃⌥Space. Chosen because:
     /// - ⌘Space is Spotlight
-    /// - ⌥Space alone collides with Alfred / Raycast defaults
-    /// - ⌥⇧Space is essentially unused by macOS and by common launcher apps
+    /// - ⌃Space is the macOS "previous input source" switch
+    /// - ⌃⌥Space is only used by macOS for "next input source", which is a
+    ///   no-op when the user has a single input source (the typical case).
+    /// - Single-hand friendly, comfortable thumb + pinky + index reach.
     /// User can still rebind in Settings → KeyboardShortcuts.Recorder.
     static let toggleSpotlightPanel = Self(
         "toggleSpotlightPanel",
-        default: .init(.space, modifiers: [.option, .shift])
+        default: .init(.space, modifiers: [.control, .option])
     )
 }
