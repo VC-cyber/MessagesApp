@@ -413,10 +413,23 @@ private struct SpotlightResultRow: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
-                    Text(result.message.body)
-                        .font(.callout)
-                        .lineLimit(2)
-                        .foregroundStyle(.primary)
+                    // Body line: real text if we have any, otherwise a typed
+                    // placeholder so attachment-only messages aren't blank.
+                    // (`messageType` is .text for plain-text rows — only the
+                    // empty-body non-text case shows the placeholder, so rows
+                    // with both body AND attachment still display the text.)
+                    if result.message.body.isEmpty && result.messageType != .text {
+                        Label(result.messageType.displayLabel,
+                              systemImage: result.messageType.sfSymbol)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text(result.message.body)
+                            .font(.callout)
+                            .lineLimit(2)
+                            .foregroundStyle(.primary)
+                    }
                 }
             }
             .padding(.horizontal, Space.md)
