@@ -32,7 +32,13 @@ final class PanelController: NSObject {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         positionAtTopCenter(panel)
-        NSApp.activate(ignoringOtherApps: true)
+        // Order the panel front and let it become key for keystrokes —
+        // but DELIBERATELY do NOT call `NSApp.activate(...)`. The panel's
+        // `.nonactivatingPanel` style means it can receive input without
+        // the owning app becoming frontmost, which is exactly the
+        // Spotlight-style behavior we want: hotkey summons ONLY the
+        // floating panel, the user's current app stays focused, and our
+        // Dashboard window (if open in the background) doesn't pop forward.
         panel.makeKeyAndOrderFront(nil)
     }
 
