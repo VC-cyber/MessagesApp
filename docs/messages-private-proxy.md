@@ -190,3 +190,76 @@ hits. This closes the lazy-load gap (the user's reported failure mode — old
 messages don't appear in the loaded bubble set) without privileged IPC.
 
 ~50 lines of Swift, no entitlement required. **This is the path forward.**
+
+---
+
+## EPILOGUE — actually, this WAS solved (2026-05-22 evening)
+
+Plan B was wrong. The third-party-accessible path EXISTS, and it's mundane:
+
+**The URL Spotlight uses to deep-link a message**:
+
+```
+sms://open?message-guid=<messageGUID>
+```
+
+**Delivered as**: Apple Event class/id `GURL` / `GURL`, target bundle
+`com.apple.MobileSMS`. No entitlement required. Any app can send this. The
+single query parameter is `message-guid` (hyphen, lowercase) carrying the
+raw `message.guid` from chat.db. Messages.app's ChatRegistry resolves the
+chat from the message GUID alone — no chatGUID needed.
+
+**How we found it (after all the failed hypotheses above)**:
+
+1. Installed Apple's Logging Configuration Profile (App Intents Logging +
+   Messages Extension Logging from
+   `https://developer.apple.com/bug-reporting/profiles-and-logs/`) — required
+   to unredact `<private>` markers in `os_log` output.
+2. `sudo killall -HUP logd` to reload the daemon.
+3. Tailed Messages.app process logs filtered to subsystems
+   `com.apple.appintents`, `com.apple.Messages`, `com.apple.UIKit.MacHelper`,
+   `com.apple.appleevents`, `com.apple.FrontBoard`.
+4. Clicked a Spotlight Messages result.
+5. The log line we were missing:
+   ```
+   Messages: (ChatKit) [com.apple.Messages:CKSceneDelegate] CKMessagesSceneDelegate:
+       -[CKSceneDelegate scene:openURLContexts:] 2A2DC5BD-...
+       <UIOpenURLContext: URL: sms://open?message-guid=96485953-75DF-47DA-A179-4F0CD81209FE; ...>
+   Messages: (ChatKit) [com.apple.Messages:CKMessagesSceneDelegate]
+       Opening url: sms://open?message-guid=96485953-... from source application: (null)
+   ```
+
+The negative results in the body of this doc all stand — every PRIVATE path
+is gated. But the public-ish path (`sms` URL scheme is registered to
+Messages.app per its Info.plist `CFBundleURLTypes` with
+`LSIsAppleDefaultForScheme = true`) accepts a `message-guid` query parameter
+we never thought to try. Spotlight uses it. Now so do we.
+
+**Why we missed it earlier**:
+
+- `sms://open?groupid=<chatID>` was known to open a chat. We tried adding
+  `&messageGuid=<G>` (and a dozen camelCase / underscore / path-style
+  variants) — none worked. The actual key is hyphenated `message-guid`,
+  which is unusual for Apple Cocoa conventions.
+- `NSWorkspace.shared.open(URL(string: "sms://open?message-guid=..."))` from
+  our process DOES open Messages.app but doesn't navigate (LaunchServices
+  routes the URL to Messages.app but the URL handler in Messages.app might
+  treat NSWorkspace-delivered URLs differently — needs more investigation,
+  but the AppleEvent path works so we don't need to chase this).
+- The AppleEvent path bypasses LS routing and goes straight to
+  `CKMessagesSceneDelegate scene:openURLContexts:`, which extracts and
+  resolves the URL via `IMChatRegistry chatForGUID:` (or equivalent).
+
+**Implementation**: `Sources/Reveal/MessagesGUIDReveal.swift::sendSpotlightOpenURL`:
+
+```swift
+let script = "tell application \"Messages\" to «event GURLGURL» \"sms://open?message-guid=\(messageGUID)\""
+NSAppleScript(source: script)?.executeAndReturnError(&err)
+```
+
+Five lines. Generalizes to attachments, images, reactions, etc.
+
+**This makes the body of this doc historical**. Future agents: don't go
+through 8 hypotheses again. The answer is `sms://open?message-guid=` over
+GURL.
+

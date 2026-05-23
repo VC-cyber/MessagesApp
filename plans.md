@@ -367,6 +367,23 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — lead (GUID jump SHIPPED — Spotlight URL form found)
+- **The win**: Messages.app now actually jumps to a specific message by GUID, with scroll + highlight, from a third-party app. Verified end-to-end against the user's real chat.db (Jul 12 2025 cactus message).
+- **The URL**:
+  - Scheme: `sms://`
+  - Path: `open`
+  - Single query param: `message-guid=<messageGUID>` (hyphen, lowercase; NO chatGUID needed — Messages.app's ChatRegistry resolves the chat from the message GUID alone)
+- **Delivery channel**: Apple Event class `GURL` / id `GURL` (the standard "Get URL" event), targeting bundle `com.apple.MobileSMS`. Sent via `NSAppleScript` with raw four-char-code syntax:
+  ```
+  tell application "Messages" to «event GURLGURL» "sms://open?message-guid=<GUID>"
+  ```
+- **How we found it**: tailed Messages.app's log while the user clicked a Spotlight Messages result. The URL is logged in plaintext by `CKMessagesSceneDelegate scene:openURLContexts:` and `Opening url: …` — but only after installing Apple's Logging Configuration Profile (Apple Intents Logging + Messages Extension profiles from developer.apple.com/bug-reporting/profiles-and-logs/) to unredact `<private>` markers.
+- **Why prior research said "impossible"**: the LNAction / ChatKit.OpenMessageIntent path WAS gated by `com.apple.private.appintents.exception.allow-foreign-bundle-identifiers`, as documented. But Spotlight doesn't use that path. Spotlight goes through the AppIntents OpenURL action which dispatches a plain `GURL` Apple Event to Messages.app, hitting the public-ish URL handler (`CKSceneDelegate scene:openURLContexts:`). Messages.app declares this URL handler in its Info.plist (`sms` scheme is registered, `LSIsAppleDefaultForScheme = true`). No entitlement required to send the AppleEvent — `osascript` and any app can do it.
+- **Implementation**: `MessagesGUIDReveal.sendSpotlightOpenURL(messageGUID:)` — five-line wrapper around `NSAppleScript`. Wired as the primary path in `MessagesGUIDReveal.reveal(...)`; the legacy AX-scroll + keystroke synthesis stays as a fallback for the rare case ChatRegistry can't find the GUID.
+- **Generalizes** to any message type — text, attachments, links, images, reactions — because the parameter is opaque GUID, not body text. Works for 1:1 AND group chats.
+- ✅ build (138 tests), ✅ test, ✅ relaunched, ✅ end-to-end verified.
+- The full negative-result research that led to this discovery remains canonical in `docs/messages-private-ipc.md` and `docs/messages-private-proxy.md` — they document why every other path we tried failed, and the wonderful inverse: the path that worked was the most ordinary one all along (a registered URL scheme + standard AppleEvent), just with a parameter name (`message-guid`) we couldn't have guessed without unredacted logs.
+
 ### 2026-05-22 — features-agent (private IPC for GUID jump — exhaustive negative result)
 - **8 hypotheses tested empirically**, each with a probe in `scripts/probes/` and real GUIDs from the user's chat.db. Documented in `docs/messages-private-ipc.md`. All probes verified against a sentinel chat (`Beck Peterson`) — its window title never changed under any private-IPC path.
 - **Hypotheses ruled out**:
