@@ -163,8 +163,34 @@ public enum AttributedBodyDecoder {
         // IMCore message-part attribute keys: __kIMMessagePartAttributeName,
         // __kIMFileTransferGUIDAttributeName, __kIMBaseWritingDirectionAttributeName, etc.
         if run.hasPrefix("__kIM") { return true }
-        // NSKeyedArchiver / NSDictionary internals.
+        // NSKeyedArchiver / NSDictionary internals (NS.string, NS.objects, etc).
         if run.hasPrefix("NS.") { return true }
+
+        // NSKeyedArchiver bplist00 structural keys. These leak when a message
+        // contains rich content (link previews, polls, Apple Pay, location).
+        // The bplist marker for an ASCII string of length N is the byte 0x50|N,
+        // which for N=4..15 happens to be ASCII uppercase (T,U,V,W,X,Y,Z,[,\,],^,_).
+        // Lossy UTF-8 decoding glues those markers to the strings they prefix,
+        // producing runs like "X$versionY$archiverT$topX$objects" — a single
+        // concatenated run we can't easily split into separate scalars.
+        // Detect by signature substring: if the run contains ANY of the
+        // distinctive bplist NSKeyedArchiver keys, the whole run is metadata.
+        for marker in ["$version", "$archiver", "$objects", "$null", "$classname", "$classes"] {
+            if run.contains(marker) { return true }
+        }
+
+        // IMAttachment / file-transfer placeholder identifiers. When a message
+        // is an attachment-only post (image/file/sticker), the attributedBody
+        // contains `at_<part>_<transferGUID>` (e.g. `at_0_7D294F11-…`) instead
+        // of body text. Filter so we don't display the placeholder GUID as the
+        // message body. (Result row shows empty for now — future enhancement:
+        // join the `attachment` table and display "[Image]" / filename.)
+        if run.hasPrefix("at_"),
+           let firstUnderscore = run.dropFirst(3).firstIndex(of: "_"),
+           run[run.startIndex..<firstUnderscore].dropFirst(3).allSatisfy(\.isNumber) {
+            return true
+        }
+
         return false
     }
 }
