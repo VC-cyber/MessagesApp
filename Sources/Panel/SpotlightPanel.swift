@@ -256,6 +256,25 @@ struct SpotlightPanel: View {
             RoundedRectangle(cornerRadius: Radius.large, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
         )
+        // The help overlay sits on top of the panel content. Tapping a
+        // token snippet inside the sheet inserts it into the query, fires
+        // the search, and dismisses — turning the cheatsheet into a
+        // launchpad as well as a reference.
+        .overlay {
+            if showHelp {
+                HelpSheet(
+                    onClose: { withAnimation(.bmDefault) { showHelp = false } },
+                    onInsert: { example in
+                        viewModel.query = example
+                        Task { await viewModel.search() }
+                        withAnimation(.bmDefault) { showHelp = false }
+                    }
+                )
+                .padding(Space.sm)
+                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+                .zIndex(1)
+            }
+        }
         .onChange(of: viewModel.query) { _, _ in
             // Debounce — 150ms after last keystroke. Search is exhaustive and
             // can take a moment on broad queries; debouncing keeps typing
@@ -265,7 +284,26 @@ struct SpotlightPanel: View {
             // index might point past the end of a now-shorter suggestion list.
             suggestionIndex = 0
         }
-        .onExitCommand(perform: dismiss)
+        .onExitCommand {
+            // Escape: close the help sheet if open, otherwise dismiss the
+            // panel. Layered escape matches Spotlight/Raycast behavior.
+            if showHelp {
+                withAnimation(.bmDefault) { showHelp = false }
+            } else {
+                dismiss()
+            }
+        }
+        // ⌘/ — the keyboard convention for "open help". Toggles the sheet
+        // so users who learn the shortcut don't have to mouse over to the
+        // ? button every time.
+        .background {
+            Button("Toggle help") {
+                withAnimation(.bmDefault) { showHelp.toggle() }
+            }
+            .keyboardShortcut("/", modifiers: [.command])
+            .opacity(0)
+            .accessibilityHidden(true)
+        }
     }
 
     /// Horizontally-scrolling row of `FilterChip` pills, one per recognized
@@ -448,10 +486,30 @@ struct SpotlightPanel: View {
             Text("\(viewModel.results.count) results")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
+            helpToggleButton
         }
         .padding(.horizontal, Space.lg)
         .padding(.vertical, Space.sm)
         .background(.thinMaterial)
+    }
+
+    /// `?` button in the footer — opens the help sheet. Sits to the right
+    /// of the result count so it's discoverable without competing with the
+    /// keyboard-hint glyphs on the left.
+    private var helpToggleButton: some View {
+        Button {
+            withAnimation(.bmDefault) { showHelp.toggle() }
+        } label: {
+            // `.tertiary` is a HierarchicalShapeStyle while Color.accentColor
+            // is a Color — use a Color-typed adapter for the off state so
+            // the ternary type-checks.
+            Image(systemName: showHelp ? "questionmark.circle.fill" : "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(showHelp ? Color.accentColor : Color.secondary.opacity(0.6))
+                .symbolRenderingMode(.hierarchical)
+        }
+        .buttonStyle(.plain)
+        .help("Search syntax (⌘/)")
     }
 
     private func footerHint(icon: String, text: String) -> some View {

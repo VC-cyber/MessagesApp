@@ -30,9 +30,16 @@ import Observation
 
 /// Persisted history of committed search queries. Observable so SwiftUI
 /// views can read `entries` directly and re-render when it changes.
+///
+/// Not `@MainActor`-isolated even though SwiftUI calls it from the main
+/// actor — `UserDefaults` is documented thread-safe and the in-memory
+/// `entries` array is mutated only from the call sites that already run
+/// on the main actor (the panel's button handlers). Leaving the class
+/// non-isolated keeps tests synchronous (no Sendable / async hops) and
+/// preserves the `@Observable` macro's tracking when consumed from a
+/// SwiftUI view body.
 @Observable
-@MainActor
-public final class RecentSearchesStore {
+public final class RecentSearchesStore: @unchecked Sendable {
 
     /// Maximum entries to keep. Tighter than typical "recents" caps
     /// because the panel is dense — more than ~6 visible items

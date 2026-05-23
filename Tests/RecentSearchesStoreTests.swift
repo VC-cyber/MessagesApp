@@ -9,7 +9,6 @@
 import XCTest
 @testable import BetterMessages
 
-@MainActor
 final class RecentSearchesStoreTests: XCTestCase {
 
     /// Make an isolated UserDefaults suite per test so persistence is real
@@ -49,11 +48,13 @@ final class RecentSearchesStoreTests: XCTestCase {
 
     func testCapEnforced() {
         let store = RecentSearchesStore(defaults: makeDefaults(), maxEntries: 3)
-        store.record("a")
-        store.record("b")
-        store.record("c")
-        store.record("d")
-        XCTAssertEqual(store.entries, ["d", "c", "b"],
+        // Min length is 2 so single-char strings are dropped; use ≥2 chars
+        // so the cap behavior is what's actually under test here.
+        store.record("aa")
+        store.record("bb")
+        store.record("cc")
+        store.record("dd")
+        XCTAssertEqual(store.entries, ["dd", "cc", "bb"],
                        "older entries should fall off when the cap is exceeded")
     }
 
