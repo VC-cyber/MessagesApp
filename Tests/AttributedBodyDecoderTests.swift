@@ -251,6 +251,109 @@ final class AttributedBodyDecoderTests: XCTestCase {
                        "End-to-end decode of letter-prefixed blob must return the body, not 'A' + body. Got: \(decoded)")
     }
 
+    // MARK: - Bare canonical UUID (attachment.guid leak through __kIMFileTransferGUID)
+
+    /// A run that is EXACTLY a canonical UUID (8-4-4-4-12 hex with hyphens,
+    /// 36 chars total) must be filtered. Comes from attachment-only messages
+    /// whose attributedBody embeds the attachment.guid next to
+    /// `__kIMFileTransferGUIDAttributeName`. See docs/decoder-uuid-leak.md.
+    func testLooksLikeMetadata_canonicalUUID() {
+        // Real UUID from the user's chat.db that triggered this fix.
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("6063E5D5-08EF-4993-BF5E-DA7C7DC723F7"),
+                      "Canonical uppercase UUID must be flagged as metadata.")
+
+        // A few more arbitrary canonical UUIDs for breadth.
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("DEADBEEF-1234-5678-9ABC-DEF012345678"))
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("00000000-0000-0000-0000-000000000000"),
+                      "All-zero canonical UUID must still be flagged.")
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
+    }
+
+    /// Lowercase / mixed-case hex must also be filtered — UUIDs come both
+    /// ways in practice and the check should be case-insensitive.
+    func testLooksLikeMetadata_uuidLowercase() {
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("6063e5d5-08ef-4993-bf5e-da7c7dc723f7"),
+                      "Canonical lowercase UUID must be filtered.")
+        XCTAssertTrue(AttributedBodyDecoder.looksLikeMetadata("6063e5D5-08Ef-4993-bF5e-Da7c7DC723f7"),
+                      "Canonical mixed-case UUID must be filtered.")
+    }
+
+    /// A UUID embedded inside a sentence must NOT match — the rule is strict
+    /// equality, so any surrounding text makes the run longer than 36 chars
+    /// and the check is a no-op. Real user content that mentions a UUID stays.
+    func testLooksLikeMetadata_uuidEmbeddedInText_preserved() {
+        let bodies = [
+            "the GUID is 6063E5D5-08EF-4993-BF5E-DA7C7DC723F7",
+            "6063E5D5-08EF-4993-BF5E-DA7C7DC723F7 is the attachment id",
+            "see 6063E5D5-08EF-4993-BF5E-DA7C7DC723F7 for details",
+            "id=6063E5D5-08EF-4993-BF5E-DA7C7DC723F7",
+            // Leading/trailing whitespace — also longer than 36 chars,
+            // also preserved.
+            "  6063E5D5-08EF-4993-BF5E-DA7C7DC723F7  ",
+        ]
+        for body in bodies {
+            XCTAssertFalse(AttributedBodyDecoder.looksLikeMetadata(body),
+                           "UUID embedded in text must be preserved: \(body)")
+        }
+    }
+
+    /// Strings that resemble a UUID but aren't the EXACT canonical form
+    /// must NOT match. Catches: missing hyphens, wrong segment lengths,
+    /// non-hex digits, total-length deviations, wrong delimiters.
+    func testLooksLikeMetadata_almostUUID_notFiltered() {
+        let cases: [(String, String)] = [
+            // Missing all hyphens — wrong length but otherwise looks UUID-ish.
+            ("6063E5D508EF4993BF5EDA7C7DC723F7", "missing hyphens"),
+            // Wrong segment lengths.
+            ("6063E5D-08EF-4993-BF5E-DA7C7DC723F7", "first segment 7 chars"),
+            ("6063E5D5-08E-4993-BF5E-DA7C7DC723F7", "second segment 3 chars"),
+            // Extra/missing character at end.
+            ("6063E5D5-08EF-4993-BF5E-DA7C7DC723F70", "37 chars"),
+            ("6063E5D5-08EF-4993-BF5E-DA7C7DC723F", "35 chars"),
+            // Non-hex char (G is not 0-9/a-f/A-F).
+            ("6063E5D5-08EF-4993-BF5E-DA7C7DC723FG", "non-hex G in last segment"),
+            ("ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ", "all non-hex (Z)"),
+            // Hyphens in wrong positions.
+            ("60-63E5D5-8EF-4993-BF5E-DA7C7DC723F7", "hyphen shifted"),
+            ("6063E5D5_08EF_4993_BF5E_DA7C7DC723F7", "underscores instead of hyphens"),
+            // Empty / very short.
+            ("", "empty"),
+            ("uuid", "short"),
+        ]
+        for (input, why) in cases {
+            XCTAssertFalse(AttributedBodyDecoder.looksLikeMetadata(input),
+                           "Near-UUID must NOT be filtered (\(why)): \(input)")
+        }
+    }
+
+    /// End-to-end: the real-world failure mode is a video/attachment-only
+    /// message whose decoded longest run is a bare UUID. Fixture row 202
+    /// (see Tests/Fixtures/build_fixture_chat_db.sh) mirrors this shape.
+    /// After the fix, decode(_:) returns an empty string so the
+    /// SpotlightResultRow type-placeholder ("Video" with the camera icon)
+    /// kicks in.
+    func testDecode_realFixture_videoMessageWithUUIDBody() throws {
+        let bundle = Bundle(for: Self.self)
+        guard let url = bundle.url(forResource: "chat", withExtension: "db") else {
+            throw XCTSkip("chat.db fixture not in test bundle resources. Re-run Tests/Fixtures/build_fixture_chat_db.sh and rebuild.")
+        }
+        let db = try ChatDatabase(url: url)
+
+        let blob: Data? = try db.dbQueue.read { db in
+            try Data.fetchOne(db, sql: "SELECT attributedBody FROM message WHERE ROWID = 202")
+        }
+        guard let blob else {
+            return XCTFail("Fixture row 202 missing or attributedBody is NULL. Re-run Tests/Fixtures/build_fixture_chat_db.sh.")
+        }
+
+        // The blob's longest printable run after framing trim is exactly
+        // 'DEADBEEF-1234-5678-9ABC-DEF012345678' — a canonical UUID.
+        // Pre-fix this returned the bare UUID. Post-fix it must return "".
+        let decoded = AttributedBodyDecoder.decode(blob)
+        XCTAssertEqual(decoded, "",
+                       "Attachment-only message whose only surviving run is a bare canonical UUID must decode to empty so the type-placeholder shows. Got: \(decoded)")
+    }
+
     // MARK: - End-to-end via fixture chat.db (integration)
 
     /// Opens the bundled fixture chat.db, fetches the rows we added that

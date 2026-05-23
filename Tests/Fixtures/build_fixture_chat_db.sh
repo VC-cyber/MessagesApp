@@ -89,6 +89,40 @@ ATTRIB_LETTER_HEX+="797979797979797979797979797979797979797979797979797979797979
 ATTRIB_LETTER_HEX+="86840269868400"
 
 # ---------------------------------------------------------------------------
+# Attachment-only UUID leak fixture (row 202)
+# ---------------------------------------------------------------------------
+# Mirrors the real-world layout for attachment-only messages where the
+# attachment.guid leaks through as a bare canonical UUID. See
+# docs/decoder-uuid-leak.md for the empirical finding.
+#
+# Layout:
+#   04 0b                                          streamtyped magic
+#   "streamtyped"                                  ASCII run (filtered)
+#   81 e8 03 84 01                                 framing
+#   40                                             '@' (trimmed)
+#   84 84 84                                       framing
+#   12 "NSString"                                  class header (filtered)
+#   00 84 84 08                                    framing
+#   22                                             length=34 for kIM attr key
+#   "__kIMFileTransferGUIDAttributeName"           __kIM-prefixed (filtered)
+#   00 84 84                                       framing
+#   24                                             length=36 ('$') for UUID
+#   "DEADBEEF-1234-5678-9ABC-DEF012345678"         the bare UUID — 36 chars
+#   86 84 02 69 86 84 00                           trailing framing
+#
+# Run-split analysis:
+#   The '$' length prefix is in the strippedFraming edge charset, so it gets
+#   trimmed off the leading edge — leaving "DEADBEEF-1234-5678-9ABC-DEF012345678"
+#   exactly as the longest surviving run. Pre-fix it decodes as the bare UUID.
+#   Post-fix isCanonicalUUID drops the run and decode returns "".
+ATTRIB_UUID_HEX="040b73747265616d747970656481e803840140848484124e53537472696e6700848408"
+ATTRIB_UUID_HEX+="225f5f6b494d46696c655472616e73666572475549444174747269627574654e616d65"
+ATTRIB_UUID_HEX+="00848424"
+# "DEADBEEF-1234-5678-9ABC-DEF012345678" in ASCII hex:
+ATTRIB_UUID_HEX+="44454144424545462d313233342d353637382d394142432d444546303132333435363738"
+ATTRIB_UUID_HEX+="86840269868400"
+
+# ---------------------------------------------------------------------------
 # Time values (Mac absolute time; epoch = 2001-01-01 00:00:00 UTC)
 # ---------------------------------------------------------------------------
 # Modern (nanoseconds): 2024-06-15 12:00:00 UTC
@@ -185,7 +219,20 @@ CREATE TABLE chat (
     chat_identifier TEXT,
     service_name TEXT,
     room_name TEXT,
-    display_name TEXT
+    display_name TEXT,
+    properties BLOB                    -- bplist00; may contain groupPhotoGuid
+);
+
+-- Attachment table: minimal subset used by ChatPhotoLoader. Real chat.db
+-- has many more columns; we only need the guid (join key) and filename
+-- (the tilde-prefixed path to the actual image bytes on disk).
+CREATE TABLE attachment (
+    ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+    guid TEXT NOT NULL,
+    filename TEXT,
+    uti TEXT,
+    mime_type TEXT,
+    total_bytes INTEGER
 );
 
 CREATE TABLE chat_handle_join (
@@ -486,6 +533,17 @@ VALUES
   (201, 'msg-lp-letter', NULL, NULL, 1, $NS_DATE, 'iMessage',
    0, x'$ATTRIB_LETTER_HEX');
 
+-- Row 202: bare-canonical-UUID leak (see decoder-uuid-leak.md). The blob
+-- shape mirrors a video/attachment-only message whose attributedBody embeds
+-- the attachment.guid next to __kIMFileTransferGUIDAttributeName. Pre-fix
+-- this decodes to the bare UUID "DEADBEEF-..."; post-fix decodes to "".
+INSERT INTO message
+  (ROWID, guid, text, handle_id, is_from_me, date, service,
+   associated_message_type, attributedBody)
+VALUES
+  (202, 'msg-uuid-leak', NULL, NULL, 1, $NS_DATE, 'iMessage',
+   0, x'$ATTRIB_UUID_HEX');
+
 -- ----- chat_message_join -----
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 1, $NS_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 2, $SEC_DATE);
@@ -531,6 +589,8 @@ INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 140
 -- Length-prefix bug fixture rows (200, 201) — chat 1 (1:1).
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 200, $NS_DATE);
 INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 201, $NS_DATE);
+-- UUID-leak fixture row (202) — chat 1.
+INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (1, 202, $NS_DATE);
 
 -- ----- indexes (mirror real chat.db enough to keep query plans honest) -----
 CREATE INDEX message_idx_date ON message(date);
