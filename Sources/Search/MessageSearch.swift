@@ -137,7 +137,7 @@ public struct MessageSearch: Sendable {
     ) throws -> [Result] {
 
         let parsed = Self.parseQuery(phrase, contacts: contacts, now: now)
-        let needles = Self.parseNeedles(parsed.freeText)
+        let needles = Self.parseNeedles(parsed.freeText, preserveCase: parsed.caseSensitive)
         // If phrase is non-empty but parses to no needles (e.g. just "+"),
         // treat as no-text-filter so person/date/chat filters still work.
 
@@ -147,7 +147,7 @@ public struct MessageSearch: Sendable {
         let combinedRange = Self.intersect(dateRange, parsed.dateRange)
 
         let (dateSQL, dateArgs) = Self.dateClause(combinedRange)
-        let (phraseSQL, phraseArgs) = Self.phraseClause(needles)
+        let (phraseSQL, phraseArgs) = Self.phraseClause(needles, caseSensitive: parsed.caseSensitive)
         let (chatSQL, chatArgs) = Self.chatClause(parsed.chatFilters, contacts: contacts)
         let (fromSQL, fromArgs) = Self.fromClause(parsed.fromFilters, contacts: contacts)
         let (toSQL, toArgs) = Self.toClause(parsed.toFilters, contacts: contacts)
@@ -215,12 +215,17 @@ public struct MessageSearch: Sendable {
             let blob: Data? = row["attributedBody"]
             let body = (text?.isEmpty == false) ? text! : AttributedBodyDecoder.decode(blob)
 
-            // Phrase filter — case-insensitive substring, all needles required.
+            // Phrase filter — all needles required. Case sensitivity follows
+            // the parsed `case:sensitive` modifier. In the default (case-
+            // insensitive) path, `needles` are already lowercased by
+            // parseNeedles; we just lowercase the body to match. In the
+            // case-sensitive path, `needles` retain user-typed case and we
+            // compare the body verbatim.
             if !needles.isEmpty {
-                let lowerBody = body.lowercased()
+                let comparedBody = parsed.caseSensitive ? body : body.lowercased()
                 var matchedAll = true
                 for n in needles {
-                    if !lowerBody.contains(n) {
+                    if !comparedBody.contains(n) {
                         matchedAll = false
                         break
                     }
@@ -491,6 +496,11 @@ public struct MessageSearch: Sendable {
         /// Content-type filters parsed from `type:` tokens. Multiple values
         /// OR together (so `type:image type:video` matches both).
         public let typeFilters: [TypeFilter]
+        /// When true, the phrase match is case-sensitive (uses SQLite `GLOB`
+        /// + byte-exact `INSTR` instead of the default `LIKE` + 3-variant
+        /// case-fold INSTR). Toggled by the modifier `case:sensitive`
+        /// (aliases `case:cs`, `case:on`) appearing anywhere in the query.
+        public let caseSensitive: Bool
         /// The tokens we recognized, in order, with their original spelling.
         /// Used by the UI to highlight active filters inline.
         public let tokens: [Token]
@@ -503,6 +513,7 @@ public struct MessageSearch: Sendable {
             dateRange: ClosedRange<Date>? = nil,
             reactionFilters: [ReactionFilter] = [],
             typeFilters: [TypeFilter] = [],
+            caseSensitive: Bool = false,
             tokens: [Token] = []
         ) {
             self.freeText = freeText
@@ -512,8 +523,32 @@ public struct MessageSearch: Sendable {
             self.dateRange = dateRange
             self.reactionFilters = reactionFilters
             self.typeFilters = typeFilters
+            self.caseSensitive = caseSensitive
             self.tokens = tokens
         }
+    }
+
+    /// Extract a `case:sensitive` / `case:cs` / `case:on` modifier from `text`
+    /// (anywhere, whitespace-bounded) and return the cleaned text plus the
+    /// flag. Case-insensitive on the modifier itself, so users can type
+    /// `Case:Sensitive` etc.
+    static func extractCaseFlag(_ text: String) -> (cleaned: String, caseSensitive: Bool) {
+        let aliases = ["case:sensitive", "case:cs", "case:on"]
+        var t = text
+        var found = false
+        for alias in aliases {
+            // Use regex with word boundaries so we don't strip `case:cs` out of
+            // a longer literal like `case:csv`. Tokens are whitespace-bounded.
+            let pattern = "(?i)(?:^|\\s)\(NSRegularExpression.escapedPattern(for: alias))(?=\\s|$)"
+            guard let re = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(t.startIndex..., in: t)
+            if re.firstMatch(in: t, range: range) != nil {
+                t = re.stringByReplacingMatches(in: t, range: range, withTemplate: "")
+                found = true
+            }
+        }
+        t = t.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+        return (t, found)
     }
 
     /// A single recognized token, with the substring range it occupied in the
@@ -633,14 +668,21 @@ public struct MessageSearch: Sendable {
             combined = combined.map { intersect($0, r) ?? $0 } ?? r
         }
 
+        // Extract case-sensitivity modifier from the free text *after* the
+        // tokenizer has consumed every recognized token. The modifier is
+        // intentionally NOT in `TokenPrefix` — it doesn't take a value and
+        // there's nothing to autocomplete.
+        let (cleanedFreeText, caseSensitive) = Self.extractCaseFlag(freeText)
+
         return ParsedQuery(
-            freeText: freeText,
+            freeText: cleanedFreeText,
             chatFilters: chats,
             fromFilters: froms,
             toFilters: tos,
             dateRange: combined,
             reactionFilters: reactionFilters,
             typeFilters: typeFilters,
+            caseSensitive: caseSensitive,
             tokens: recognized
         )
     }
@@ -876,12 +918,18 @@ public struct MessageSearch: Sendable {
         return ("AND (" + clauses.joined(separator: " AND ") + ")", args)
     }
 
-    /// Parse the phrase into lowercased needles. Empty needles (from trailing
-    /// `+`) and pure-whitespace tokens are discarded.
-    static func parseNeedles(_ phrase: String) -> [String] {
+    /// Parse the phrase into needles (lowercased by default). Empty needles
+    /// (from trailing `+`) and pure-whitespace tokens are discarded. Pass
+    /// `preserveCase: true` for case-sensitive search — the needles retain
+    /// their original spelling and downstream SQL+Swift comparisons match
+    /// exact case.
+    static func parseNeedles(_ phrase: String, preserveCase: Bool = false) -> [String] {
         phrase
             .split(separator: "+", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .map {
+                let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                return preserveCase ? trimmed : trimmed.lowercased()
+            }
             .filter { !$0.isEmpty }
     }
 
@@ -908,27 +956,39 @@ public struct MessageSearch: Sendable {
     /// filter on the decoded body is case-insensitive and will refine — but
     /// it can't recover rows the SQL pre-filter never fetched. Fully fixed by
     /// the FTS5 mirror (Round 2 item #4).
-    static func phraseClause(_ needles: [String]) -> (String, [DatabaseValueConvertible]) {
+    static func phraseClause(
+        _ needles: [String],
+        caseSensitive: Bool = false
+    ) -> (String, [DatabaseValueConvertible]) {
         guard !needles.isEmpty else { return ("", []) }
         var clauses: [String] = []
         var args: [DatabaseValueConvertible] = []
         for needle in needles {
-            let lower = needle.lowercased()
-            let title = lower.capitalized       // "henry" -> "Henry"
-            let upper = lower.uppercased()      // "henry" -> "HENRY"
+            if caseSensitive {
+                // Case-sensitive variant: GLOB is byte-exact in SQLite (LIKE
+                // does ASCII case-folding). INSTR is always byte-exact; we
+                // skip the 3-variant fan-out so the user gets EXACT case.
+                clauses.append("(m.text GLOB ? OR INSTR(m.attributedBody, ?) > 0)")
+                args.append("*\(needle)*")
+                args.append(Data(needle.utf8))
+            } else {
+                let lower = needle.lowercased()
+                let title = lower.capitalized       // "henry" -> "Henry"
+                let upper = lower.uppercased()      // "henry" -> "HENRY"
 
-            clauses.append("""
-                (
-                    m.text LIKE ?
-                    OR INSTR(m.attributedBody, ?) > 0
-                    OR INSTR(m.attributedBody, ?) > 0
-                    OR INSTR(m.attributedBody, ?) > 0
-                )
-                """)
-            args.append("%\(lower)%")
-            args.append(Data(lower.utf8))
-            args.append(Data(title.utf8))
-            args.append(Data(upper.utf8))
+                clauses.append("""
+                    (
+                        m.text LIKE ?
+                        OR INSTR(m.attributedBody, ?) > 0
+                        OR INSTR(m.attributedBody, ?) > 0
+                        OR INSTR(m.attributedBody, ?) > 0
+                    )
+                    """)
+                args.append("%\(lower)%")
+                args.append(Data(lower.utf8))
+                args.append(Data(title.utf8))
+                args.append(Data(upper.utf8))
+            }
         }
         return ("AND " + clauses.joined(separator: " AND "), args)
     }
