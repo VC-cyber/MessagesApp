@@ -43,6 +43,10 @@ public final class SearchViewModel {
     public var query: String = ""
     public var selectedContact: Contact?
     public var dateRange: ClosedRange<Date>?
+    /// When true, the phrase match is case-sensitive (GLOB + byte-exact INSTR
+    /// instead of the default ASCII-folding LIKE + 3-variant INSTR). Driven
+    /// by the `Aa` toggle in the search field.
+    public var caseSensitive: Bool = false
 
     public private(set) var results: [MessageSearch.Result] = []
     public private(set) var allContacts: [Contact] = []
@@ -113,6 +117,7 @@ public final class SearchViewModel {
         let phrase = query
         let person = selectedContact
         let range = dateRange
+        let caseSensitive = self.caseSensitive
 
         isSearching = true
         errorMessage = nil
@@ -122,7 +127,8 @@ public final class SearchViewModel {
                 let res = try engine.search(
                     phrase: phrase,
                     person: person,
-                    dateRange: range
+                    dateRange: range,
+                    caseSensitive: caseSensitive
                 )
                 return .success(res)
             } catch {

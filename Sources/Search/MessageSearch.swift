@@ -133,11 +133,12 @@ public struct MessageSearch: Sendable {
         person: Contact? = nil,
         dateRange: ClosedRange<Date>? = nil,
         limit: Int? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        caseSensitive: Bool = false
     ) throws -> [Result] {
 
         let parsed = Self.parseQuery(phrase, contacts: contacts, now: now)
-        let needles = Self.parseNeedles(parsed.freeText, preserveCase: parsed.caseSensitive)
+        let needles = Self.parseNeedles(parsed.freeText, preserveCase: caseSensitive)
         // If phrase is non-empty but parses to no needles (e.g. just "+"),
         // treat as no-text-filter so person/date/chat filters still work.
 
@@ -147,7 +148,7 @@ public struct MessageSearch: Sendable {
         let combinedRange = Self.intersect(dateRange, parsed.dateRange)
 
         let (dateSQL, dateArgs) = Self.dateClause(combinedRange)
-        let (phraseSQL, phraseArgs) = Self.phraseClause(needles, caseSensitive: parsed.caseSensitive)
+        let (phraseSQL, phraseArgs) = Self.phraseClause(needles, caseSensitive: caseSensitive)
         let (chatSQL, chatArgs) = Self.chatClause(parsed.chatFilters, contacts: contacts)
         let (fromSQL, fromArgs) = Self.fromClause(parsed.fromFilters, contacts: contacts)
         let (toSQL, toArgs) = Self.toClause(parsed.toFilters, contacts: contacts)
@@ -222,7 +223,7 @@ public struct MessageSearch: Sendable {
             // case-sensitive path, `needles` retain user-typed case and we
             // compare the body verbatim.
             if !needles.isEmpty {
-                let comparedBody = parsed.caseSensitive ? body : body.lowercased()
+                let comparedBody = caseSensitive ? body : body.lowercased()
                 var matchedAll = true
                 for n in needles {
                     if !comparedBody.contains(n) {
@@ -496,11 +497,6 @@ public struct MessageSearch: Sendable {
         /// Content-type filters parsed from `type:` tokens. Multiple values
         /// OR together (so `type:image type:video` matches both).
         public let typeFilters: [TypeFilter]
-        /// When true, the phrase match is case-sensitive (uses SQLite `GLOB`
-        /// + byte-exact `INSTR` instead of the default `LIKE` + 3-variant
-        /// case-fold INSTR). Toggled by the modifier `case:sensitive`
-        /// (aliases `case:cs`, `case:on`) appearing anywhere in the query.
-        public let caseSensitive: Bool
         /// The tokens we recognized, in order, with their original spelling.
         /// Used by the UI to highlight active filters inline.
         public let tokens: [Token]
@@ -513,7 +509,6 @@ public struct MessageSearch: Sendable {
             dateRange: ClosedRange<Date>? = nil,
             reactionFilters: [ReactionFilter] = [],
             typeFilters: [TypeFilter] = [],
-            caseSensitive: Bool = false,
             tokens: [Token] = []
         ) {
             self.freeText = freeText
@@ -523,32 +518,8 @@ public struct MessageSearch: Sendable {
             self.dateRange = dateRange
             self.reactionFilters = reactionFilters
             self.typeFilters = typeFilters
-            self.caseSensitive = caseSensitive
             self.tokens = tokens
         }
-    }
-
-    /// Extract a `case:sensitive` / `case:cs` / `case:on` modifier from `text`
-    /// (anywhere, whitespace-bounded) and return the cleaned text plus the
-    /// flag. Case-insensitive on the modifier itself, so users can type
-    /// `Case:Sensitive` etc.
-    static func extractCaseFlag(_ text: String) -> (cleaned: String, caseSensitive: Bool) {
-        let aliases = ["case:sensitive", "case:cs", "case:on"]
-        var t = text
-        var found = false
-        for alias in aliases {
-            // Use regex with word boundaries so we don't strip `case:cs` out of
-            // a longer literal like `case:csv`. Tokens are whitespace-bounded.
-            let pattern = "(?i)(?:^|\\s)\(NSRegularExpression.escapedPattern(for: alias))(?=\\s|$)"
-            guard let re = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(t.startIndex..., in: t)
-            if re.firstMatch(in: t, range: range) != nil {
-                t = re.stringByReplacingMatches(in: t, range: range, withTemplate: "")
-                found = true
-            }
-        }
-        t = t.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
-        return (t, found)
     }
 
     /// A single recognized token, with the substring range it occupied in the
@@ -668,21 +639,14 @@ public struct MessageSearch: Sendable {
             combined = combined.map { intersect($0, r) ?? $0 } ?? r
         }
 
-        // Extract case-sensitivity modifier from the free text *after* the
-        // tokenizer has consumed every recognized token. The modifier is
-        // intentionally NOT in `TokenPrefix` — it doesn't take a value and
-        // there's nothing to autocomplete.
-        let (cleanedFreeText, caseSensitive) = Self.extractCaseFlag(freeText)
-
         return ParsedQuery(
-            freeText: cleanedFreeText,
+            freeText: freeText,
             chatFilters: chats,
             fromFilters: froms,
             toFilters: tos,
             dateRange: combined,
             reactionFilters: reactionFilters,
             typeFilters: typeFilters,
-            caseSensitive: caseSensitive,
             tokens: recognized
         )
     }

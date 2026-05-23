@@ -169,6 +169,7 @@ struct SpotlightPanel: View {
         VStack(spacing: 0) {
             SearchField(
                 text: $viewModel.query,
+                caseSensitive: $viewModel.caseSensitive,
                 placeholder: "Search messages",
                 rotatingExamples: SpotlightPanel.placeholderExamples
             )
@@ -283,6 +284,12 @@ struct SpotlightPanel: View {
             // Reset selection any time the query changes — otherwise a stale
             // index might point past the end of a now-shorter suggestion list.
             suggestionIndex = 0
+        }
+        .onChange(of: viewModel.caseSensitive) { _, _ in
+            // Toggling the Aa pill must re-run the search — both code paths
+            // (case-sensitive GLOB vs default LIKE+INSTR) produce different
+            // result sets for the same query string.
+            viewModel.searchSoon()
         }
         .onExitCommand {
             // Escape: close the help sheet if open, otherwise dismiss the

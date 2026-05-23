@@ -238,9 +238,9 @@ extension HelpSection {
                     category: .freeText
                 ),
                 .init(
-                    token: "case:sensitive",
-                    description: "Make the phrase match case-sensitive. Aliases: case:cs, case:on.",
-                    example: "iPhone case:sensitive",
+                    token: "Aa toggle",
+                    description: "Tap the Aa pill on the right of the search field to switch between case-insensitive (default) and case-sensitive matching. When Aa is highlighted, only exact-case matches return — e.g. iPhone will not match iphone.",
+                    example: "iPhone",
                     category: .freeText
                 ),
             ]

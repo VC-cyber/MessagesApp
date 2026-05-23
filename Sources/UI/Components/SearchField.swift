@@ -21,6 +21,11 @@ struct SearchField: View {
     }
 
     @Binding var text: String
+    /// Optional binding to a case-sensitive toggle. When supplied, an `Aa`
+    /// pill is rendered inside the field; tap toggles it. When nil, no
+    /// toggle is shown — useful for browse-window contexts that don't need
+    /// it. The pill sits just before the trailing clear-X button.
+    var caseSensitive: Binding<Bool>? = nil
     var filters: [ActiveFilter] = []
     var placeholder: String = "Search messages, people, dates…"
     /// Optional rotating example queries shown IN PLACE of the placeholder
@@ -121,6 +126,41 @@ struct SearchField: View {
                                 )
                             )
                     }
+                }
+
+                if let caseBinding = caseSensitive {
+                    Button {
+                        caseBinding.wrappedValue.toggle()
+                    } label: {
+                        Text("Aa")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(caseBinding.wrappedValue ? Color.accentColor : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: Radius.small, style: .continuous)
+                                    .fill(caseBinding.wrappedValue
+                                          ? Color.accentColor.opacity(0.18)
+                                          : Color.primary.opacity(0.05))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Radius.small, style: .continuous)
+                                    .strokeBorder(
+                                        caseBinding.wrappedValue
+                                            ? Color.accentColor.opacity(0.45)
+                                            : Color.hairline,
+                                        lineWidth: 0.5
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .animation(.bmDefault, value: caseBinding.wrappedValue)
+                    .help(caseBinding.wrappedValue
+                          ? "Case-sensitive search is ON. Click to make it case-insensitive."
+                          : "Case-insensitive search. Click to make it case-sensitive.")
+                    .accessibilityLabel("Case-sensitive search")
+                    .accessibilityValue(caseBinding.wrappedValue ? "On" : "Off")
+                    .accessibilityAddTraits(caseBinding.wrappedValue ? .isSelected : [])
                 }
 
                 if !text.isEmpty {
