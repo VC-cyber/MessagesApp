@@ -1052,11 +1052,22 @@ public struct MessageSearch: Sendable {
             // type range. The `m.guid IS NOT NULL` guard prevents matching
             // every NULL-GUID row to empty-prefix variants on a few very
             // old rows that have no guid.
+            // Per-sender dedup: a sender who switched reactions (e.g. love →
+            // like) has TWO rows in `message`, but the UI's ReactionLoader
+            // shows only their latest. The reactions count badge users see
+            // is the count of DISTINCT senders with a non-removed reaction
+            // — so the filter must dedupe the same way, otherwise
+            // `reactions:>=6` matches messages whose badge shows 3.
+            // GROUP BY (handle_id, is_from_me) collapses to one row per
+            // sender; the outer SELECT COUNT(*) then counts senders.
             let baseSub = """
-                SELECT COUNT(*) FROM message r
-                WHERE r.associated_message_type BETWEEN 2000 AND 2999
-                  AND m.guid IS NOT NULL
-                  AND r.associated_message_guid IN (\(inExpressions))
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM message r
+                    WHERE r.associated_message_type BETWEEN 2000 AND 2999
+                      AND m.guid IS NOT NULL
+                      AND r.associated_message_guid IN (\(inExpressions))
+                    GROUP BY r.handle_id, r.is_from_me
+                )
                 """
             switch filter {
             case .count(let cmp, let n):
@@ -1066,9 +1077,22 @@ public struct MessageSearch: Sendable {
                 // Sugar for count >= 1.
                 clauses.append("((\(baseSub)) >= 1)")
             case .kind(let kind):
-                // Same base but additionally constrained to one type value,
-                // and we require count > 0.
-                let typed = baseSub + " AND r.associated_message_type = ?"
+                // Same base but additionally constrained to one type value.
+                // The inner-select WHERE adds the type predicate before the
+                // GROUP BY so we count distinct senders whose latest reaction
+                // is the requested kind. We still rely on the BETWEEN bound
+                // dropping removed reactions; if a sender added love then
+                // removed it, their love row remains and (by ReactionLoader's
+                // own logic) they'd still count — both sides match.
+                let typed = """
+                    SELECT COUNT(*) FROM (
+                        SELECT 1 FROM message r
+                        WHERE r.associated_message_type = ?
+                          AND m.guid IS NOT NULL
+                          AND r.associated_message_guid IN (\(inExpressions))
+                        GROUP BY r.handle_id, r.is_from_me
+                    )
+                    """
                 clauses.append("((\(typed)) >= 1)")
                 args.append(kind.typeValue)
             }
