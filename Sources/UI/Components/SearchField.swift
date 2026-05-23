@@ -23,10 +23,47 @@ struct SearchField: View {
     @Binding var text: String
     var filters: [ActiveFilter] = []
     var placeholder: String = "Search messages, people, dates…"
+    /// Optional rotating example queries shown IN PLACE of the placeholder
+    /// when the field is empty + unfocused. Each example fades through
+    /// over `rotationInterval` (default 4s). Pass empty to disable.
+    ///
+    /// Implementation: SwiftUI's `TextField` placeholder can't cleanly
+    /// crossfade between strings — its placeholder argument is taken at
+    /// view-build time and the only way to animate text inside the field
+    /// is to overlay our own `Text` and pass an empty placeholder to the
+    /// underlying field. That's exactly what we do.
+    var rotatingExamples: [String] = []
+    /// How long each example stays visible before fading to the next.
+    var rotationInterval: TimeInterval = 4.0
     var onRemoveFilter: ((ActiveFilter) -> Void)? = nil
     var onSubmit: (() -> Void)? = nil
 
     @FocusState private var isFocused: Bool
+
+    /// Index into `rotatingExamples`. Advances on a `rotationInterval`-
+    /// second timer while the rotator is active.
+    @State private var rotatorIndex: Int = 0
+
+    /// Whether the rotating-placeholder layer should drive the field's
+    /// prompt. False as soon as the user types or focuses the field — at
+    /// which point we fall back to the static `placeholder` string.
+    private var isRotatorActive: Bool {
+        !rotatingExamples.isEmpty && text.isEmpty && !isFocused
+    }
+
+    /// The current placeholder string the field shows beneath the user's
+    /// text. When the rotator is active this is empty (the rotator owns
+    /// the slot); otherwise it's the static `placeholder` value.
+    private var fieldPlaceholder: String {
+        isRotatorActive ? "" : placeholder
+    }
+
+    /// The example string the rotating layer should currently show.
+    private var currentExample: String {
+        guard !rotatingExamples.isEmpty else { return "" }
+        let safe = ((rotatorIndex % rotatingExamples.count) + rotatingExamples.count) % rotatingExamples.count
+        return rotatingExamples[safe]
+    }
 
     var body: some View {
         GlassEffectContainer(spacing: 18) {
@@ -58,12 +95,33 @@ struct SearchField: View {
                     }
                 }
 
-                TextField(placeholder, text: $text)
-                    .textFieldStyle(.plain)
-                    .font(.title3)
-                    .focused($isFocused)
-                    .onSubmit { onSubmit?() }
-                    .submitLabel(.search)
+                ZStack(alignment: .leading) {
+                    TextField(fieldPlaceholder, text: $text)
+                        .textFieldStyle(.plain)
+                        .font(.title3)
+                        .focused($isFocused)
+                        .onSubmit { onSubmit?() }
+                        .submitLabel(.search)
+
+                    // Rotating-example overlay — sits in the placeholder slot
+                    // when the rotator is active. We give the inner Text a
+                    // .id so SwiftUI knows each example is a distinct view
+                    // and animates the transition between them.
+                    if isRotatorActive {
+                        Text(currentExample)
+                            .font(.title3)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .allowsHitTesting(false)
+                            .id(rotatorIndex)
+                            .transition(
+                                .asymmetric(
+                                    insertion: .opacity.combined(with: .offset(y: 6)),
+                                    removal: .opacity.combined(with: .offset(y: -6))
+                                )
+                            )
+                    }
+                }
 
                 if !text.isEmpty {
                     Button {
@@ -96,8 +154,25 @@ struct SearchField: View {
             }
             .animation(.bmGlassMorph, value: filters)
             .animation(.bmDefault, value: text.isEmpty)
+            .animation(.smooth(duration: 0.5), value: rotatorIndex)
+            .animation(.bmDefault, value: isRotatorActive)
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
+            .task(id: isRotatorActive) {
+                // Driven by `isRotatorActive`: when it flips true we start
+                // a fresh loop; when it flips false the task is cancelled.
+                guard isRotatorActive else { return }
+                while !Task.isCancelled {
+                    let nanos = UInt64(rotationInterval * 1_000_000_000)
+                    do {
+                        try await Task.sleep(nanoseconds: nanos)
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled, isRotatorActive else { return }
+                    rotatorIndex = (rotatorIndex + 1) % max(rotatingExamples.count, 1)
+                }
+            }
         }
     }
 }

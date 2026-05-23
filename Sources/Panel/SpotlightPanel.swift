@@ -12,6 +12,23 @@ struct SpotlightPanel: View {
     @State private var selectedResultID: Int64?
     @State private var suggestionIndex: Int = 0
 
+    /// Example queries that crossfade through the placeholder slot while
+    /// the search field is empty and unfocused. Each example demonstrates
+    /// a different filter category so a user idling over the panel learns
+    /// the grammar by osmosis.
+    ///
+    /// The "Try:" prefix makes it unambiguously a hint, not the user's
+    /// own text. We keep the list small (5 entries, ~20s cycle) so a user
+    /// hovering on the panel briefly sees variety without being
+    /// overwhelmed.
+    static let placeholderExamples: [String] = [
+        "Try: cactus from:Mom",
+        "Try: type:image last:30d",
+        "Try: reactions:>=3",
+        "Try: vacation+flight",
+        "Try: chat:family last:1y",
+    ]
+
     /// Parsed view of the current query — recomputed on every render. The
     /// parser is microseconds-fast and this keeps every derived view (chips,
     /// recognized-tokens hint, suggestion eligibility) in lockstep without
@@ -143,7 +160,8 @@ struct SpotlightPanel: View {
         VStack(spacing: 0) {
             SearchField(
                 text: $viewModel.query,
-                placeholder: "Search messages — try chat:amme from:mom last:7d"
+                placeholder: "Search messages",
+                rotatingExamples: SpotlightPanel.placeholderExamples
             )
             .padding(.horizontal, Space.lg)
             .padding(.top, Space.lg)
