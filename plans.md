@@ -367,6 +367,19 @@ Each agent appends a dated entry when they do non-trivial work. Format:
 - **Why this is the right shape**: typing latency is a UX concern handled in the UI/view-model layer with debouncing and supersession. Accuracy is a correctness concern handled in the query layer with no truncation. Mixing them — capping the SQL — silently broke accuracy for the wrong reason.
 - ✅ tests, ✅ build, relaunched.
 
+### 2026-05-22 — build-agent (Dock app + Dashboard primary)
+- Product reframing: app is no longer a menu-bar-only utility. It's a regular Dock app whose primary surface is the Dashboard; the hotkey-summoned spotlight panel remains the quick-search path.
+- `project.yml`: dropped `INFOPLIST_KEY_LSUIElement` (was `YES`); added `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`; switched `Resources/Assets.xcassets` from `resources:` to `sources:` entry so XcodeGen actually classifies it as a resource (the earlier resources spec wasn't producing a build phase at all — diagnosis-by-trial-and-error).
+- `Sources/BetterMessagesApp.swift`: reordered scenes so `Window("Dashboard", id: WindowID.dashboard)` is declared FIRST. SwiftUI auto-opens the first-declared `Window` scene on cold launch. Added an invisible `WindowOpenerBridge` view inside the Dashboard scene that captures the `openWindow` environment action and stashes it on a singleton for AppKit callers.
+- `Sources/Panel/AppDelegate.swift`:
+  - `applicationShouldHandleReopen` now opens the Dashboard window (was the spotlight panel — wrong path for the Dock metaphor).
+  - `applicationDidFinishLaunching` has a cold-launch safety net: if no non-panel window is visible, open Dashboard. Defensive against SwiftUI's auto-open misbehaving.
+  - Hotkey wiring untouched. `PanelController` not modified. ⌃⌘M still summons the floating panel.
+  - New `WindowOpener` singleton bridges SwiftUI's `openWindow` action to AppKit-side callers.
+- App icon: `Resources/Assets.xcassets/AppIcon.appiconset/` — 10 PNG sizes (16→1024), generated programmatically (magnifying glass over a message bubble on iMessage-blue gradient). `CFBundleIconName` and `CFBundleIconFile` both end up in the built Info.plist.
+- ✅ build, ✅ tests (138), ✅ verified: cold launch → Dashboard opens; reopen Apple Event (Dock-click equivalent) → Dashboard reappears; menu bar status item still present; ⌃⌘M still works.
+- **cmd-tab gotcha**: dropping `LSUIElement` means the app now appears in the cmd-tab cycle. Intentional per user request; flagging for the record.
+
 ### 2026-05-22 — lead (GUID jump SHIPPED — Spotlight URL form found)
 - **The win**: Messages.app now actually jumps to a specific message by GUID, with scroll + highlight, from a third-party app. Verified end-to-end against the user's real chat.db (Jul 12 2025 cactus message).
 - **The URL**:
