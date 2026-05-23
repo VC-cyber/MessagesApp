@@ -38,7 +38,43 @@ public enum AttributedBodyDecoder {
         let candidates = printableRuns(in: decoded, minimumLength: 2)
             .map(strippedFraming)
             .filter { !$0.isEmpty && !looksLikeMetadata($0) }
-        return candidates.max(by: { $0.count < $1.count }) ?? ""
+        if let best = candidates.max(by: { $0.count < $1.count }) {
+            return best
+        }
+        // Pure-emoji-body fallback. A message that's just `💀` decodes to a
+        // single supplementary-plane scalar (1 char), which the
+        // `minimumLength: 2` filter drops. Scan for the longest contiguous
+        // run of emoji-related scalars: supplementary plane chars (>= U+10000),
+        // zero-width joiners (U+200D), and variation selectors (U+FE00–U+FE0F)
+        // — together that covers single emoji, skin-tone modifiers, and
+        // ZWJ-composed sequences like family emoji.
+        return longestEmojiRun(in: decoded)
+    }
+
+    /// Longest contiguous run of emoji / ZWJ-sequence scalars in `string`.
+    /// Used as a last-resort fallback for pure-emoji message bodies.
+    static func longestEmojiRun(in string: String) -> String {
+        var best = String.UnicodeScalarView()
+        var current = String.UnicodeScalarView()
+        func reset() {
+            if current.count > best.count { best = current }
+            current.removeAll(keepingCapacity: true)
+        }
+        for s in string.unicodeScalars {
+            let v = s.value
+            let isEmojiLike =
+                v >= 0x10000 ||                       // supplementary planes
+                v == 0x200D ||                        // ZWJ
+                (v >= 0xFE00 && v <= 0xFE0F) ||       // variation selectors
+                (v >= 0x2600 && v <= 0x27BF)          // misc symbols (☀️, ✨, etc.)
+            if isEmojiLike {
+                current.append(s)
+            } else {
+                reset()
+            }
+        }
+        reset()
+        return String(best)
     }
 
     /// All printable runs in `string` at least `minimumLength` characters long.
